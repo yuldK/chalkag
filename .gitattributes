@@ -1,0 +1,16 @@
+* text=auto
+
+*.cmake text eol=crlf
+*.cpp text eol=crlf
+*.h text eol=crlf
+*.json text eol=crlf
+*.md text eol=crlf
+*.ps1 text eol=crlf
+*.rc text eol=crlf
+CMakeLists.txt text eol=crlf
+.clang-format text eol=crlf
+.editorconfig text eol=crlf
+.gitattributes text eol=crlf
+.gitignore text eol=crlf
+.gitmodules text eol=crlf
+/third_party/luil/** -text

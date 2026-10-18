@@ -1,0 +1,11 @@
+/build/
+/bin/
+/.vs/
+/CMakeUserPresets.json
+/data/
+/third_party/ffmpeg-dist/
+*.user
+*.suo
+.env
+.env.*
+!.env.example

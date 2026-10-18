@@ -1,0 +1,3 @@
+[submodule "third_party/luil"]
+	path = third_party/luil
+	url = https://github.com/yuldK/luil.git

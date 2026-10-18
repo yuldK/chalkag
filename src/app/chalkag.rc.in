@@ -1,0 +1,3 @@
+#include "@PROJECT_SOURCE_DIR@/src/app/resource_ids.h"
+
+CHALKAG_ICON_RESOURCE ICON "@PROJECT_SOURCE_DIR@/assets/chalkag.ico"

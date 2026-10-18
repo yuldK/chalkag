@@ -1,0 +1,32 @@
+{
+    "repository": "dloebl/cgif",
+    "revision": "b68f18ac125085923cae83b458e019e89feebe25",
+    "license": "MIT",
+    "files": [
+        {
+            "path": "inc/cgif.h",
+            "upstream_sha256": "6dae79bb53af01d6b80c77a3145e8ae15efb687ac98cf28f7b5500b2e8462812",
+            "sha256": "badd090d6873cff399d5ed960b03c468961ddbd86ce63163625d32ff02750aca"
+        },
+        {
+            "path": "inc/cgif_raw.h",
+            "upstream_sha256": "b586df3493d968ec12f35c7b1f6521437929a279ead0b8f342357a2bc1fc42b9",
+            "sha256": "c4c352b801ac4a4a9ee8ad1ef61f030c3cda05c7555b2399614314e59aa7befd"
+        },
+        {
+            "path": "src/cgif.c",
+            "upstream_sha256": "24eee141f189649a8f3422965b6f8ba09dbbf8f03b436384c6b889ca3ad76582",
+            "sha256": "fce25d0cc94ea4e76ecc30f10593c069f57409a973186c2a9a0a41a5eee5ad44"
+        },
+        {
+            "path": "src/cgif_raw.c",
+            "upstream_sha256": "0c0c91cdae50e89c3229c59dd94a50191948c60ece549368e4adbaf30a193149",
+            "sha256": "c6602f71f9196352b7c427158b145c6206637451b26e5ec687ba0725733958cf"
+        },
+        {
+            "path": "LICENSE",
+            "upstream_sha256": "5ab612867790b74a44ae9503c62bd8b57ef9810c410f9baf98405f1100faec2a",
+            "sha256": "10865664539f9acd52f175d40b44b625f8cdce3e5998a63e68cd65a9e849182e"
+        }
+    ]
+}

@@ -1,0 +1,41 @@
+{
+    "revision": "845d5476a866141ba35ac133f856fa62f0b7445f",
+    "files": [
+        {
+            "sha256": "337d71f6f8968fda89bb911d8ac0f90f32b9ccef319702b83f7563bdca38aa45",
+            "path": "webp/encode.h",
+            "upstream": "src/webp/encode.h",
+            "upstream_sha256": "976e56b6a14473204c949baa9cb62d06a7acf3b796198a346be3ef5d168242bb",
+            "local_path": "webp/encode.h"
+        },
+        {
+            "sha256": "7ca8805fd7c60f241ea8b915492f53592c30a55a7f8146a5b31a268a4b876a69",
+            "path": "webp/mux.h",
+            "upstream": "src/webp/mux.h",
+            "upstream_sha256": "c72cf593f8194c671efcade33f1678294380120d45a337511d612a3acb643f35",
+            "local_path": "webp/mux.h"
+        },
+        {
+            "sha256": "3affc7d0f20e6ee3a4c7d30735a31962ab1437b7de25038e131a8e3376ab20b3",
+            "path": "webp/mux_types.h",
+            "upstream": "src/webp/mux_types.h",
+            "upstream_sha256": "d3313ad38c26d17abd244ab683e662dedead1489ec0f910bc31eba7ce2f8838c",
+            "local_path": "webp/mux_types.h"
+        },
+        {
+            "sha256": "609a1fb9f07f45af7a4501d25cd1c926154dec47a9d10bed181f74c3b80d2b38",
+            "path": "webp/types.h",
+            "upstream": "src/webp/types.h",
+            "upstream_sha256": "dcf81657e515b2973cebfd256099f0ed45b7627b9e78e5492dc8ca0167ed7c12",
+            "local_path": "webp/types.h"
+        },
+        {
+            "sha256": "fa027f73c8913b96a02ec8576f6984d1d7600b65374ff5715919f84ecf03349d",
+            "path": "COPYING",
+            "upstream": "COPYING",
+            "upstream_sha256": "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf",
+            "local_path": "COPYING",
+            "normalization": "CRLF; removed one trailing empty line"
+        }
+    ]
+}
