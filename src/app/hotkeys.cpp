@@ -273,7 +273,19 @@ namespace chalkag {
 
     std::u8string encode_hotkeys(const hotkey_bindings& bindings)
     {
-        return format_hotkey(bindings[0]) + u8"\n" + format_hotkey(bindings[1]) + u8"\n" + format_hotkey(bindings[2]);
+        std::u8string text {};
+
+        for (std::size_t index {}; index < bindings.size(); ++index)
+        {
+            if (index != 0)
+            {
+                text += u8"\n";
+            }
+
+            text += format_hotkey(bindings[index]);
+        }
+
+        return text;
     }
 
     global_hotkeys::global_hotkeys(void* window) noexcept

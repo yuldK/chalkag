@@ -36,7 +36,7 @@ namespace chalkag {
         ) const;
 
     private:
-        std::array<luil::text::text_edit_state, 3> fields_ {};
+        std::array<luil::text::text_edit_state, default_hotkeys.size()> fields_ {};
         std::optional<luil::text_composition_event> composition_ {};
     };
 

@@ -709,6 +709,117 @@ namespace chalkag {
             check(frame_for(driver)->popups.empty(), "drag selection closes numeric editor");
         }
 
+        void test_clear_recording_ui()
+        {
+            for (const float scale : { 1.0f, 1.5f, 2.0f })
+            {
+                for (const bool expanded : { false, true })
+                {
+                    command_driver driver {};
+                    runtime_state state {};
+                    state.options_open = expanded;
+                    driver.handle(luil::app_message { state });
+                    driver.handle(
+                        luil::app_message {
+                            window_metrics_intent { (expanded ? options_window_width : command_window_width) * scale,
+                                                    (expanded ? options_window_height : command_window_height) * scale,
+                                                    scale
+                            }
+                        }
+                    );
+                    check(
+                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-discard-recording" }),
+                        "clear is hidden without a retained recording"
+                    );
+
+                    state.recording = true;
+                    driver.handle(luil::app_message { state });
+                    check(
+                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-discard-recording" }),
+                        "clear is hidden while recording"
+                    );
+                    state.recording = false;
+                    state.pending_recording = true;
+                    driver.handle(luil::app_message { state });
+                    auto frame { frame_for(driver) };
+                    const auto* clear { frame->tree->find({ command_kind, u8"toolbar-discard-recording" }) };
+                    const auto* save { frame->tree->find({ command_kind, u8"toggle-recording" }) };
+                    const auto* options { frame->tree->find({ command_kind, u8"open-options" }) };
+                    check(
+                        clear && clear->enabled() && clear->accessibility().name == u8"비우기",
+                        "retained recording exposes clear even without a selected region"
+                    );
+                    if (clear && save && options)
+                    {
+                        check(
+                            save->bounds().x + save->bounds().width + 6 * scale <= clear->bounds().x
+                                && clear->bounds().x + clear->bounds().width + 6 * scale <= options->bounds().x,
+                            "clear fits between save and options at every DPI and window size"
+                        );
+                        const auto actions { (*clear->action(luil::ui_trigger::left_click))({}) };
+                        const auto* action { std::get_if<luil::app_ui_command>(&actions.front()) };
+                        check(
+                            action && action->command == static_cast<std::uint32_t>(runtime_command::discard_recording),
+                            "toolbar clear uses the existing confirmation command"
+                        );
+                    }
+                    send_target(driver, target(u8"toolbar-discard-recording"));
+                    frame = frame_for(driver);
+                    const auto* popup { help_popup(*frame) };
+                    check(
+                        popup && help_name(*popup, u8"help-shortcut") == u8"Ctrl+Shift+R",
+                        "clear help shows the configured default shortcut"
+                    );
+
+                    state.dialog = { message_dialog_kind::discard_recording, 1, u8"녹화 비우기", u8"확인" };
+                    driver.handle(luil::app_message { state });
+                    check(
+                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-discard-recording" })->enabled(),
+                        "confirmation blocks repeated clear commands"
+                    );
+                    state.dialog = {};
+                    state.busy = true;
+                    driver.handle(luil::app_message { state });
+                    check(
+                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-discard-recording" }),
+                        "clear is hidden while saving"
+                    );
+                    state.busy = false;
+                    state.pending_recording = false;
+                    driver.handle(luil::app_message { state });
+                    check(
+                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-discard-recording" }),
+                        "clearing restores the idle toolbar"
+                    );
+                }
+            }
+        }
+
+        void test_clear_shortcut_editor()
+        {
+            shortcut_editor editor {};
+            command_policy policy {};
+            const auto target { policy.text_target_of(luil::application_element_kind(11)) };
+            check(target == static_cast<luil::text_input_target>(204), "clear field routes to its own text target");
+            check(!policy.text_target_of(luil::application_element_kind(9)), "color picker is not a shortcut field");
+            luil::text_edit_request request {};
+            request.target = *target;
+            request.command = luil::text::text_edit_command::replace_all;
+            request.text = u8"Ctrl+Alt+R";
+            request.offset = request.text.size();
+            check(editor.handle(luil::app_message { shortcut_edit_intent { request } }), "clear field accepts edits");
+            auto expected { default_hotkeys };
+            expected[3] = *parse_hotkey(request.text);
+            check(editor.bindings() == expected, "clear shortcut can be customized independently");
+            request.text.clear();
+            request.offset = 0;
+            static_cast<void>(editor.handle(luil::app_message { shortcut_edit_intent { request } }));
+            expected[3] = {};
+            check(editor.bindings() == expected, "clear shortcut can be disabled");
+            static_cast<void>(editor.handle(luil::app_message { reset_shortcuts_intent {} }));
+            check(editor.bindings() == default_hotkeys, "reset restores the clear shortcut default");
+        }
+
         void test_recording_export_ui()
         {
             check(
@@ -1287,6 +1398,18 @@ namespace chalkag {
                 page->tree->find({ command_kind, u8"apply-shortcuts" }) != nullptr,
                 "preferences expose shortcut apply action"
             );
+            const auto* clear_shortcut {
+                page->tree->find({ luil::application_element_kind(11), u8"shortcut-discard" })
+            };
+            const auto* apply_shortcuts { page->tree->find({ command_kind, u8"apply-shortcuts" }) };
+            const auto* shortcut_help { page->tree->find({ command_kind, u8"shortcut-help" }) };
+            const auto* status { page->tree->find({ command_kind, u8"runtime-status" }) };
+            check(
+                clear_shortcut && clear_shortcut->text_input()->text == u8"Ctrl+Shift+R"
+                    && clear_shortcut->bounds().y + clear_shortcut->bounds().height < apply_shortcuts->bounds().y
+                    && shortcut_help->bounds().y + shortcut_help->bounds().height <= status->bounds().y,
+                "fourth shortcut field fits above actions and help stays above the status footer"
+            );
 
             const auto* colors { page->tree->find({ luil::application_element_kind(9), u8"accent-picker" }) };
             check(
@@ -1319,6 +1442,8 @@ namespace chalkag {
             test_recording_button_help();
             test_saved_file_ui();
             test_save_progress_ui();
+            test_clear_recording_ui();
+            test_clear_shortcut_editor();
             test_recording_export_ui();
             test_content_and_disabled_reason();
             test_popup_lifetime();

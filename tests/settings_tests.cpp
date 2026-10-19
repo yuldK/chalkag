@@ -46,7 +46,11 @@ namespace chalkag {
             settings.capture.include_cursor = true;
             settings.capture.still_format = image_format::webp;
             settings.capture.animation_format = image_format::webp;
-            settings.shortcuts = { *parse_hotkey(u8"Ctrl+Alt+F9"), *parse_hotkey(u8"Ctrl+Alt+S"), hotkey_binding {} };
+            settings.shortcuts = { *parse_hotkey(u8"Ctrl+Alt+F9"),
+                                   *parse_hotkey(u8"Ctrl+Alt+S"),
+                                   hotkey_binding {},
+                                   *parse_hotkey(u8"Ctrl+Alt+R")
+            };
             settings.appearance = { luil::theme_preference::dark, u8"violet" };
             settings.window_position = command_window_position { -1700, -150 };
             settings.presets
@@ -67,7 +71,7 @@ namespace chalkag {
             check(!defaults.always_on_top, "missing file defaults always on top to false");
             check(!defaults.window_position, "missing file leaves window position to the OS");
             check(
-                encode_hotkeys(defaults.shortcuts) == u8"Ctrl+Shift+A\nCtrl+Shift+S\nCtrl+R",
+                encode_hotkeys(defaults.shortcuts) == u8"Ctrl+Shift+A\nCtrl+Shift+S\nCtrl+R\nCtrl+Shift+R",
                 "fresh settings use the requested shortcuts in action order"
             );
             check(
@@ -153,6 +157,26 @@ namespace chalkag {
                 "legacy file retains system theme and mint accent"
             );
             check(!store.load(legacy_warning).window_position, "legacy file leaves window position to the OS");
+
+            legacy = valid;
+            legacy["shortcuts"].erase("discard_recording");
+            write_text(store.path(), legacy.dump());
+            auto expected { sample_settings().shortcuts };
+            expected[3] = default_hotkeys[3];
+            check(
+                store.load(legacy_warning).shortcuts == expected && legacy_warning.empty(),
+                "three-action settings retain custom bindings and gain the default clear shortcut"
+            );
+            legacy["shortcuts"]["recording"] = "Ctrl+Shift+R";
+            write_text(store.path(), legacy.dump());
+            expected[2] = default_hotkeys[3];
+            expected[3] = {};
+            check(
+                store.load(legacy_warning).shortcuts == expected && legacy_warning.empty()
+                    && read_text(store.path()) == legacy.dump(),
+                "legacy shortcut collision disables only the new shortcut without rewriting the file"
+            );
+
             invalid["window"]["position"] = "0, 0";
             check_rejected_document(store, invalid, "string window position rejected");
             invalid = valid;
@@ -170,6 +194,12 @@ namespace chalkag {
             invalid = valid;
             invalid["shortcuts"]["screenshot"] = invalid["shortcuts"]["select_region"];
             check_rejected_document(store, invalid, "duplicate shortcuts rejected without rewriting file");
+            invalid = valid;
+            invalid["shortcuts"]["discard_recording"] = invalid["shortcuts"]["select_region"];
+            check_rejected_document(store, invalid, "duplicate clear shortcut rejected");
+            invalid = valid;
+            invalid["shortcuts"]["discard_recording"] = "Ctrl+F12";
+            check_rejected_document(store, invalid, "reserved clear shortcut rejected");
             invalid = valid;
             invalid["shortcuts"]["recording"] = "Ctrl+F12";
             check_rejected_document(store, invalid, "reserved shortcut rejected");

@@ -15,10 +15,9 @@ namespace chalkag {
         [[nodiscard]] bool operator==(const hotkey_binding&) const = default;
     };
 
-    using hotkey_bindings = std::array<hotkey_binding, 3>;
-    inline constexpr hotkey_bindings default_hotkeys { hotkey_binding { 6, 'A' },
-                                                       hotkey_binding { 6, 'S' },
-                                                       hotkey_binding { 2, 'R' }
+    using hotkey_bindings = std::array<hotkey_binding, 4>;
+    inline constexpr hotkey_bindings default_hotkeys {
+        hotkey_binding { 6, 'A' }, hotkey_binding { 6, 'S' }, hotkey_binding { 2, 'R' }, hotkey_binding { 6, 'R' }
     };
 
     [[nodiscard]] std::optional<hotkey_binding> parse_hotkey(std::u8string_view text);
@@ -42,6 +41,6 @@ namespace chalkag {
     private:
         void* window_ {};
         hotkey_bindings bindings_ {};
-        std::array<bool, 3> active_ {};
+        std::array<bool, default_hotkeys.size()> active_ {};
     };
 } // namespace chalkag

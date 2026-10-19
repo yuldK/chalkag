@@ -513,6 +513,9 @@ namespace chalkag {
                                   u8"애니메이션 녹화 / 정지",
                                   luil::codicons::icon_record
             },
+            command_description {
+                runtime_command::discard_recording, u8"toolbar-discard-recording", u8"녹화 비우기", 0
+            },
             command_description { runtime_command::toggle_options,
                                   u8"open-options",
                                   u8"옵션 / 영역 프리셋",
@@ -526,6 +529,12 @@ namespace chalkag {
 
         for (const command_description& command : commands)
         {
+            if (command.command == runtime_command::discard_recording
+                && (!runtime_state_.pending_recording || runtime_state_.recording))
+            {
+                continue;
+            }
+
             if (runtime_state_.busy && command.command != runtime_command::toggle_always_on_top)
             {
                 continue;
@@ -572,6 +581,13 @@ namespace chalkag {
                     luil::ui_element_id { command_kind, command.owner }, std::move(record_config)
                 );
             }
+            else if (command.command == runtime_command::discard_recording)
+            {
+                button = std::make_unique<luil::text_button_element>(
+                    luil::ui_element_id { command_kind, command.owner },
+                    luil::text_button_config { .text = u8"비우기", .visual = luil::text_button_visual::normal }
+                );
+            }
             else
             {
                 button = std::make_unique<luil::button_element>(
@@ -613,6 +629,12 @@ namespace chalkag {
             else if (command.command == runtime_command::toggle_always_on_top)
             {
                 button->set_enabled(runtime_state_.settings_writable);
+            }
+            else if (command.command == runtime_command::discard_recording)
+            {
+                button->set_enabled(
+                    !runtime_state_.busy && !runtime_state_.recording && runtime_state_.pending_recording
+                );
             }
             else
             {
@@ -673,6 +695,12 @@ namespace chalkag {
                     : u8"선택한 영역을 애니메이션 이미지로 녹화합니다.\n정지 후 원본을 보관합니다. 저장 버튼을 누르면 "
                       u8"현재 옵션으로 저장합니다.";
             }
+            else if (command.command == runtime_command::discard_recording)
+            {
+                content.shortcut = format_hotkey(runtime_state_.settings.shortcuts[3]);
+                content.body = u8"보관한 녹화 원본을 비우고 새 녹화를 준비합니다.\n확인 후 비우며, 이미 저장한 파일은 "
+                               u8"유지됩니다.";
+            }
             else if (command.command == runtime_command::toggle_always_on_top)
             {
                 content.body = u8"명령창을 다른 창보다 위에 표시합니다. 다시 누르면 해제합니다.\n재실행해도 설정이 "
@@ -701,6 +729,11 @@ namespace chalkag {
 
             help.emplace(command.owner, std::move(content));
 
+            const float button_width { command.command == runtime_command::toggle_recording        ? 78.0f
+                                           : command.command == runtime_command::discard_recording ? 64.0f
+                                                                                                   : 36.0f
+            };
+
             if (command.command == runtime_command::toggle_always_on_top)
             {
                 button->arrange({ { width - 60.0f * scale, 0, 28.0f * scale, caption_height }, scale });
@@ -722,7 +755,7 @@ namespace chalkag {
                 button->arrange(
                     { { left,
                         caption_height + toolbar_padding * scale,
-                        (command.command == runtime_command::toggle_recording ? 78.0f : 36.0f) * scale,
+                        button_width * scale,
                         toolbar_button_height * scale
                     },
                       scale
@@ -731,7 +764,7 @@ namespace chalkag {
             }
 
             root->add(std::move(button));
-            left += (36.0f + toolbar_spacing) * scale;
+            left += (button_width + toolbar_spacing) * scale;
         }
 
         if (runtime_state_.busy)
@@ -1522,7 +1555,7 @@ namespace chalkag {
                             };
                         }
                     );
-                    element->arrange({ { x * scale, 582 * scale, 114 * scale, 32 * scale }, scale });
+                    element->arrange({ { x * scale, 598 * scale, 114 * scale, 32 * scale }, scale });
                     content_root->add(std::move(element));
                 };
                 add_button(u8"reset-shortcuts", u8"기본값", 20, false);
@@ -1533,7 +1566,7 @@ namespace chalkag {
                     u8"shortcut-error",
                     error.empty() ? (shortcuts_edited_ ? std::u8string {} : runtime_state_.shortcut_error) : error,
                     20,
-                    624,
+                    640,
                     content_width,
                     11,
                     true
@@ -1542,7 +1575,7 @@ namespace chalkag {
                     u8"shortcut-help",
                     u8"Ctrl+Alt+F9처럼 조합을 입력하세요.\n비워 두면 사용하지 않습니다. 기본값도 적용해야 저장됩니다.",
                     20,
-                    676,
+                    682,
                     content_width,
                     11,
                     true

@@ -6,15 +6,20 @@
 
 namespace chalkag {
     namespace {
-        constexpr std::array owners { u8"shortcut-select", u8"shortcut-screenshot", u8"shortcut-recording" };
-        constexpr std::array names { u8"영역 선택 단축키", u8"스크린샷 단축키", u8"녹화·정지 단축키" };
-        constexpr std::array labels { u8"영역 선택", u8"스크린샷", u8"녹화·정지" };
+        constexpr std::array owners {
+            u8"shortcut-select", u8"shortcut-screenshot", u8"shortcut-recording", u8"shortcut-discard"
+        };
+        constexpr std::array names {
+            u8"영역 선택 단축키", u8"스크린샷 단축키", u8"녹화·정지 단축키", u8"녹화 비우기 단축키"
+        };
+        constexpr std::array labels { u8"영역 선택", u8"스크린샷", u8"녹화·정지", u8"녹화 비우기" };
+        constexpr std::array<std::uint32_t, 4> input_kinds { 6, 7, 8, 11 };
 
         std::optional<std::size_t> shortcut_index(const luil::text_input_target target)
         {
             const auto value { static_cast<std::uint32_t>(target) };
-            return value >= 201 && value <= 203 ? std::optional { static_cast<std::size_t>(value - 201) }
-                                                : std::nullopt;
+            return value >= 201 && value < 201 + owners.size() ? std::optional { static_cast<std::size_t>(value - 201) }
+                                                               : std::nullopt;
         }
 
     } // namespace
@@ -136,7 +141,7 @@ namespace chalkag {
     {
         for (std::size_t index {}; index < fields_.size(); ++index)
         {
-            const float y { top + static_cast<float>(index) * 44 };
+            const float y { top + static_cast<float>(index) * 36 };
             auto label = std::make_unique<luil::label_element>(
                 luil::ui_element_id { luil::application_element_kind(0), std::u8string { owners[index] } + u8"-label" },
                 luil::label_config { .text = labels[index], .font_size = 12 }
@@ -149,9 +154,7 @@ namespace chalkag {
             config.placeholder = names[index];
 
             auto input = std::make_unique<luil::text_input_element>(
-                luil::ui_element_id { luil::application_element_kind(static_cast<std::uint32_t>(6 + index)),
-                                      owners[index]
-                },
+                luil::ui_element_id { luil::application_element_kind(input_kinds[index]), owners[index] },
                 luil::make_text_input_view(fields_[index], composition_, target),
                 std::move(config)
             );
@@ -164,9 +167,9 @@ namespace chalkag {
 
     std::optional<luil::text_input_target> command_policy::text_target_of(const luil::ui_element_kind kind) const
     {
-        for (std::uint32_t index {}; index < 3; ++index)
+        for (std::uint32_t index {}; index < input_kinds.size(); ++index)
         {
-            if (kind == luil::application_element_kind(6 + index))
+            if (kind == luil::application_element_kind(input_kinds[index]))
             {
                 return static_cast<luil::text_input_target>(201 + index);
             }

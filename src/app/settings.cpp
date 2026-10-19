@@ -327,10 +327,24 @@ namespace chalkag {
                 const auto& shortcuts { document.at("shortcuts") };
                 require(shortcuts.is_object(), u8"단축키 설정은 객체여야 합니다.");
 
-                constexpr std::array names { "select_region", "screenshot", "recording" };
+                constexpr std::array names { "select_region", "screenshot", "recording", "discard_recording" };
 
                 for (std::size_t index {}; index < names.size(); ++index)
                 {
+                    if (index == 3 && !shortcuts.contains(names[index]))
+                    {
+                        // 기존 조합이 새 기본값을 쓰고 있으면 기존 기능의 단축키를 우선한다.
+                        for (std::size_t previous {}; previous < index; ++previous)
+                        {
+                            if (settings.shortcuts[previous] == settings.shortcuts[index])
+                            {
+                                settings.shortcuts[index] = {};
+                            }
+                        }
+
+                        continue;
+                    }
+
                     const auto& value { shortcuts.at(names[index]) };
                     require(value.is_string(), u8"단축키 설정은 문자열이어야 합니다.");
 
@@ -422,6 +436,7 @@ namespace chalkag {
             shortcuts["select_region"] = narrow(format_hotkey(settings.shortcuts[0]));
             shortcuts["screenshot"] = narrow(format_hotkey(settings.shortcuts[1]));
             shortcuts["recording"] = narrow(format_hotkey(settings.shortcuts[2]));
+            shortcuts["discard_recording"] = narrow(format_hotkey(settings.shortcuts[3]));
             nlohmann::json appearance {};
             appearance["theme"] = narrow(luil::theme_preference_name(settings.appearance.theme));
             appearance["accent_id"] = narrow(settings.appearance.accent_id);

@@ -1603,7 +1603,7 @@ namespace chalkag {
                 {}
                 return 0;
             }
-            else if (message == WM_HOTKEY && wparam >= 101 && wparam <= 103)
+            else if (message == WM_HOTKEY && wparam >= 101 && wparam < 101 + default_hotkeys.size())
             {
                 try
                 {
@@ -1616,7 +1616,8 @@ namespace chalkag {
                     {
                         const auto action { wparam == 101       ? runtime_command::select_region
                                                 : wparam == 102 ? runtime_command::take_screenshot
-                                                                : runtime_command::toggle_recording
+                                                : wparam == 103 ? runtime_command::toggle_recording
+                                                                : runtime_command::discard_recording
                         };
                         self->execute({ .command = static_cast<std::uint32_t>(action) });
                     }

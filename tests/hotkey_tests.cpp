@@ -51,13 +51,17 @@ namespace chalkag {
 
             check(
                 decode_hotkeys(encode_hotkeys(default_hotkeys)) == std::optional { default_hotkeys },
-                "round trip all three actions"
+                "round trip all four actions"
             );
-            check(decode_hotkeys(u8"\n\n").has_value(), "all shortcuts may be disabled");
-            check(!decode_hotkeys(u8"Ctrl+A\nCtrl+A\nCtrl+B"), "reject duplicate bindings");
             check(
-                !decode_hotkeys(u8"Ctrl+A\nCtrl+B") && !decode_hotkeys(u8"Ctrl+A\nCtrl+B\nCtrl+C\n"),
-                "require exactly three bindings"
+                encode_hotkeys(hotkey_bindings {}) == u8"\n\n\n"
+                    && decode_hotkeys(u8"\n\n\n") == std::optional { hotkey_bindings {} },
+                "all shortcuts may be disabled"
+            );
+            check(!decode_hotkeys(u8"Ctrl+A\nCtrl+B\nCtrl+C\nCtrl+A"), "reject duplicate clear binding");
+            check(
+                !decode_hotkeys(u8"Ctrl+A\nCtrl+B\nCtrl+C") && !decode_hotkeys(u8"Ctrl+A\nCtrl+B\nCtrl+C\nCtrl+D\n"),
+                "require exactly four bindings"
             );
         }
 
@@ -102,7 +106,8 @@ namespace chalkag {
 
             const hotkey_bindings original { hotkey_binding { 7, VK_F20 },
                                              hotkey_binding { 7, VK_F21 },
-                                             hotkey_binding { 7, VK_F22 }
+                                             hotkey_binding { 7, VK_F22 },
+                                             hotkey_binding { 7, VK_F24 }
             };
             bool available {};
             {
@@ -117,24 +122,25 @@ namespace chalkag {
                     check(hotkeys.apply(swapped).empty(), "swap existing shortcuts without collisions");
 
                     auto duplicate { swapped };
-                    duplicate[1] = duplicate[0];
+                    duplicate[3] = duplicate[0];
                     check(
-                        !hotkeys.apply(duplicate).empty() && hotkeys.active(0) && hotkeys.active(1)
-                            && hotkeys.active(2),
+                        !hotkeys.apply(duplicate).empty() && hotkeys.active(0) && hotkeys.active(1) && hotkeys.active(2)
+                            && hotkeys.active(3),
                         "validation retains active bindings"
                     );
 
                     auto conflicting { swapped };
-                    conflicting[1].key = VK_F23;
+                    conflicting[3].key = VK_F23;
                     check(
                         !hotkeys.apply(conflicting).empty() && hotkeys.active(0) && hotkeys.active(1)
-                            && hotkeys.active(2),
+                            && hotkeys.active(2) && hotkeys.active(3),
                         "occupied chord rolls back all bindings"
                     );
                     check(!RegisterHotKey(blocker, 2, 7, VK_F22), "restored original shortcut remains registered");
+                    check(!RegisterHotKey(blocker, 2, 7, VK_F24), "restored clear shortcut remains registered");
                     check(
                         hotkeys.apply(hotkey_bindings {}).empty() && !hotkeys.active(0) && !hotkeys.active(1)
-                            && !hotkeys.active(2),
+                            && !hotkeys.active(2) && !hotkeys.active(3),
                         "disable all shortcuts"
                     );
                     check(hotkeys.apply(original).empty(), "re-enable after disabling");
