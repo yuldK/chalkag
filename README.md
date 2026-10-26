@@ -34,13 +34,13 @@ Windows 11 x64에서 사용합니다. 준비된 `chalkag.exe`가 있다면 **쓰
 2. **사진** 또는 `Ctrl+Shift+S`로 정지 이미지를 저장합니다.
 3. 애니메이션은 **녹화** 또는 `Ctrl+R`으로 시작하고, 같은 버튼·단축키로 정지합니다.
 4. 정지 후 **저장**을 눌러 애니메이션 파일을 만듭니다. 기본값은 자동 저장이 꺼져 있습니다.
-   새 녹화를 시작하려면 **저장** 옆의 **비우기** 또는 `Ctrl+Shift+R`로 보관 원본을 비웁니다.
-5. **옵션**에서 캡쳐·영역·저장·앱 설정을 바꿉니다.
+   다음 촬영은 **새 녹화**로 시작합니다. 저장 전 원본은 교체 여부를 확인하며, 보관 중에도 사진을 찍을 수 있습니다.
+5. **옵션 → 내보내기**에서 형식·출력 크기·품질·압축 속도를 조절합니다. **이미지 열기**로 기존 파일을 편집합니다.
 
 저장 파일은 실행 파일 옆 `data/captures`, 설정은 `data/settings.json`에 있습니다.
 같은 사용자 세션에서 앱을 다시 실행하면 기존 창이 활성화됩니다.
 
-화면별 안내와 편집 방법은 [사용 설명서](docs/user-guide.md)를 참고하세요.
+화면별 안내와 편집 방법은 [사용 설명서](docs/user-guide.md), 최신 UI의 전후 GIF와 검증 내용은 [UX 개선 기록](docs/ux-improvements.md)을 참고하세요.
 
 ## Getting started in English
 
@@ -64,8 +64,8 @@ No separate encoder or FFmpeg installation is required. To build from source, fo
 2. Click **사진** (Screenshot), or press `Ctrl+Shift+S`, to save a still image.
 3. Click **녹화** (Record), or press `Ctrl+R`, to start an animation. Use the same button or shortcut to stop.
 4. Click **저장** (Save) after stopping to export the animation. Automatic saving is off by default.
-   To start a new recording, use **비우기** (Clear) beside Save, or `Ctrl+Shift+R`, to discard the retained source.
-5. Click **옵션** (Options) to access capture, region, export, and application settings.
+   Use **새 녹화** (New recording) for the next capture. Unsaved source replacement requires confirmation; still captures remain available.
+5. Use **옵션 → 내보내기** (Options → Export) to adjust format, size, quality, and compression speed. Use **이미지 열기** (Open image) to edit a file.
 
 Images are saved in `data/captures` beside the executable; settings are stored in `data/settings.json`.
 Launching another copy in the same user session activates the existing window.

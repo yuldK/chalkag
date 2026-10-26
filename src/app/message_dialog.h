@@ -12,6 +12,7 @@ namespace chalkag {
         information,
         discard_recording,
         exit_application,
+        replace_recording,
     };
 
     struct message_dialog_state

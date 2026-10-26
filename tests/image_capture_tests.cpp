@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -523,6 +524,99 @@ namespace chalkag {
             );
         }
 
+        void check_retained_still(const std::filesystem::path& directory)
+        {
+            std::atomic<int> supplied {};
+            image_capture capture {
+                directory,
+                [&](const capture_region region, const capture_options options, SkBitmap& bitmap) {
+                    const int width { region.width * options.output_percent / 100 };
+                    const int height { region.height * options.output_percent / 100 };
+                    if (!bitmap.tryAllocPixels(
+                            SkImageInfo::Make(width, height, kBGRA_8888_SkColorType, kOpaque_SkAlphaType)
+                        ))
+                    {
+                        return false;
+                    }
+                    bitmap.eraseColor(SkColorSetRGB(35, 72, 110));
+                    ++supplied;
+                    return true;
+                }
+            };
+            capture_options options {};
+            check(capture.start_recording({ 0, 0, 96, 64 }, options).success, "synthetic recording starts");
+            const auto deadline { std::chrono::steady_clock::now() + std::chrono::seconds { 5 } };
+            while (supplied.load() == 0 && std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds { 2 });
+            }
+
+            check(capture.stop_recording().success, "synthetic recording is retained");
+            const auto source { capture.snapshot() };
+            check(!source.frames.empty(), "synthetic source contains frames");
+            if (source.frames.empty())
+            {
+                return;
+            }
+            const auto photo { capture.take_screenshot({ 0, 0, 48, 32 }, options) };
+            check(photo.success && capture.has_pending_recording(), "still capture preserves retained recording");
+            check(capture.recorded_region() == source.region, "still capture leaves recording geometry unchanged");
+            check(capture.snapshot().frames.size() == source.frames.size(), "still cleanup preserves source frames");
+            check(std::filesystem::exists(source.frames.front().path), "still cleanup preserves source storage");
+            capture_options invalid { options };
+            invalid.output_percent = 0;
+            check(
+                !capture.take_screenshot({ 0, 0, 48, 32 }, invalid).success && capture.has_pending_recording(),
+                "failed still capture preserves retained source"
+            );
+            const auto cancel_still { capture.take_screenshot({ 0, 0, 48, 32 }, options, [&](save_progress progress) {
+                if (progress.stage == save_stage::preparing)
+                {
+                    capture.request_save_cancel();
+                }
+            })
+            };
+            check(
+                !cancel_still.success && capture.has_pending_recording(), "cancelled still capture preserves raw source"
+            );
+            capture.reset_save_cancel();
+            check(capture.take_screenshot({ 0, 0, 48, 32 }, options).success, "new still works after cancellation");
+            const auto cancelled { capture.save_recording(options, [&](save_progress progress) {
+                if (progress.stage == save_stage::preparing)
+                {
+                    capture.request_save_cancel();
+                }
+            })
+            };
+            check(!cancelled.success && capture.has_pending_recording(), "cancelled export preserves raw source");
+            capture.reset_save_cancel();
+            check(capture.save_recording(options).success, "retained source exports after cancelled export");
+            check(capture.snapshot().frames.size() == source.frames.size(), "resaving preserves original frame count");
+            capture.discard_recording();
+            const int before_next { supplied.load() };
+            const auto next_deadline { std::chrono::steady_clock::now() + std::chrono::seconds { 5 } };
+            check(
+                capture.start_recording({ 0, 0, 48, 32 }, options).success,
+                "new recording starts after retained still and export"
+            );
+            while (supplied.load() <= before_next && std::chrono::steady_clock::now() < next_deadline)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds { 2 });
+            }
+            capture.request_save_cancel();
+            check(
+                capture.stop_recording().success && capture.has_pending_recording(),
+                "save cancellation during finalization keeps raw source"
+            );
+            capture.reset_save_cancel();
+            capture.request_cancel();
+            capture.reset_save_cancel();
+            check(
+                !capture.take_screenshot({ 0, 0, 48, 32 }, options).success,
+                "save cancellation reset never clears shutdown"
+            );
+        }
+
     } // namespace
 } // namespace chalkag
 
@@ -536,6 +630,7 @@ int wmain(int argument_count, wchar_t* arguments[])
     const bool screen { argument_count > 2 && std::wstring { arguments[2] } == L"--screen" };
     chalkag::run_checks(directory, screen);
     chalkag::native_checks(directory);
+    chalkag::check_retained_still(directory / L"retained-still");
 
     if (!chalkag::failures)
     {

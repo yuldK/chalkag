@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -31,6 +32,36 @@
 
 namespace chalkag {
     namespace {
+        capture_frame_source make_frame_source()
+        {
+#if defined(CHALKAG_TEST_APPLICATION)
+            // 테스트 앱만 합성 프레임을 주입해 사용자 화면 없이 실제 촬영 흐름을 검증한다.
+            if (GetEnvironmentVariableW(L"CHALKAG_TEST_SYNTHETIC_CAPTURE", nullptr, 0) > 0)
+            {
+                return [](const capture_region region, const capture_options options, SkBitmap& bitmap) {
+                    const int width {
+                        static_cast<int>(static_cast<std::int64_t>(region.width) * options.output_percent / 100)
+                    };
+                    const int height {
+                        static_cast<int>(static_cast<std::int64_t>(region.height) * options.output_percent / 100)
+                    };
+                    if (!bitmap.tryAllocPixels(
+                            SkImageInfo::Make(width, height, kBGRA_8888_SkColorType, kOpaque_SkAlphaType)
+                        ))
+                    {
+                        return false;
+                    }
+                    static std::atomic<unsigned> sequence {};
+                    bitmap.eraseColor(
+                        sequence.fetch_add(1) % 2 ? SkColorSetRGB(35, 72, 110) : SkColorSetRGB(55, 100, 140)
+                    );
+                    return true;
+                };
+            }
+#endif
+            return {};
+        }
+
         [[nodiscard]] std::filesystem::path executable_directory()
         {
             std::wstring path(32768, L'\0');
@@ -106,7 +137,7 @@ namespace chalkag {
             , hotkeys_ { owner_ }
             , directory_ { executable_directory() }
             , store_ { directory_ }
-            , capture_ { directory_ }
+            , capture_ { directory_, make_frame_source() }
             , region_ { host,
                         [this] {
                             execute(
@@ -140,7 +171,8 @@ namespace chalkag {
                 region_.set_glow_width(state_.settings.glow_width);
                 state_.glow_position = static_cast<float>(state_.settings.glow_width);
                 state_.quality_position = static_cast<float>(state_.settings.capture.webp_quality);
-                state_.status += hotkeys_.initialize(state_.settings.shortcuts);
+                state_.shortcut_error = hotkeys_.initialize(state_.settings.shortcuts);
+                state_.status += state_.shortcut_error;
 
                 if (state_.status.empty())
                 {
@@ -436,6 +468,9 @@ namespace chalkag {
             reset_progress();
 
             const bool auto_save { state_.settings.auto_save };
+            saving_recording_ = auto_save;
+            state_.recording_saved = false;
+            state_.save_cancel_requested = false;
             const auto options { state_.settings.capture };
             state_.status = auto_save ? u8"녹화 마무리·저장 중…" : u8"녹화 원본을 마무리하는 중…";
             publish();
@@ -456,6 +491,8 @@ namespace chalkag {
 
             const auto options { state_.settings.capture };
             state_.busy = true;
+            saving_recording_ = true;
+            state_.save_cancel_requested = false;
             reset_progress();
             state_.status = u8"보관한 녹화를 저장하는 중… 원본은 유지됩니다.";
             publish();
@@ -489,25 +526,27 @@ namespace chalkag {
                 const auto kind { state_.dialog.kind };
                 state_.dialog = {};
 
-                if (action == runtime_command::confirm_dialog && kind == message_dialog_kind::discard_recording
+                if (action == runtime_command::confirm_dialog
+                    && (kind == message_dialog_kind::discard_recording
+                        || kind == message_dialog_kind::replace_recording)
                     && !state_.busy && !state_.recording)
                 {
                     capture_.discard_recording();
                     state_.pending_recording = false;
+                    state_.recording_saved = false;
                     state_.recorded_region = {};
                     state_.recorded_duration = 0;
                     state_.saved_summary.clear();
                     state_.status = u8"녹화 원본을 비웠습니다. 새 녹화를 시작할 수 있습니다.";
+
+                    if (kind == message_dialog_kind::replace_recording)
+                    {
+                        execute_command({ static_cast<std::uint32_t>(runtime_command::toggle_recording) });
+                        return;
+                    }
                 }
 
                 publish();
-
-                if (action == runtime_command::confirm_dialog && kind == message_dialog_kind::exit_application
-                    && !state_.busy && !state_.recording)
-                {
-                    approved_close_ = true;
-                    PostMessageW(owner_, WM_CLOSE, 0, 0);
-                }
 
                 return;
             }
@@ -536,6 +575,23 @@ namespace chalkag {
                 return;
             }
 
+            if (action == runtime_command::show_output_options || action == runtime_command::show_capture_options)
+            {
+                if (!state_.options_open)
+                {
+                    toggle_options();
+                }
+
+                host_->post_app_message(
+                    luil::app_message { options_tab_intent { action == runtime_command::show_output_options
+                                                                 ? options_page::output
+                                                                 : options_page::capture
+                    }
+                    }
+                );
+                return;
+            }
+
             if (action == runtime_command::open_output_folder)
             {
                 open_output_folder();
@@ -545,6 +601,51 @@ namespace chalkag {
             if (action == runtime_command::open_saved_file)
             {
                 open_saved_file();
+                return;
+            }
+
+            if (action == runtime_command::open_editor_output)
+            {
+                const std::filesystem::path output { command.argument };
+
+                if (output.parent_path() == directory_ / L"data" / L"captures")
+                {
+                    state_.saved_output = output;
+                    open_saved_file();
+                }
+
+                return;
+            }
+
+            if (action == runtime_command::request_close)
+            {
+                if (state_.busy || state_.recording)
+                {
+                    show_dialog(
+                        message_dialog_kind::information, u8"작업 진행 중", u8"촬영·저장을 마친 뒤 종료하세요."
+                    );
+                }
+                else if (state_.pending_recording)
+                {
+                    show_dialog(
+                        message_dialog_kind::exit_application,
+                        u8"종료할까요?",
+                        u8"보관한 녹화 원본을 비우고 종료합니다. 이미 저장한 파일은 유지됩니다."
+                    );
+                }
+                return;
+            }
+
+            if (action == runtime_command::cancel_save)
+            {
+                if (state_.busy)
+                {
+                    capture_.request_save_cancel();
+                    state_.save_cancel_requested = true;
+                    state_.status = u8"저장을 취소하는 중… 원본은 유지됩니다.";
+                    publish();
+                }
+
                 return;
             }
 
@@ -561,6 +662,52 @@ namespace chalkag {
 
             if (state_.recording)
             {
+                return;
+            }
+
+            if (action == runtime_command::new_recording)
+            {
+                if (!region_.current_region() && state_.recorded_region.valid())
+                {
+                    region_.set_region(state_.recorded_region);
+                }
+
+                if (!state_.pending_recording)
+                {
+                    execute_command({ static_cast<std::uint32_t>(runtime_command::toggle_recording) });
+                    return;
+                }
+
+                if (!state_.recording_saved)
+                {
+                    show_dialog(
+                        message_dialog_kind::replace_recording,
+                        u8"새 녹화를 시작할까요?",
+                        u8"아직 저장하지 않은 녹화가 있습니다. 새 녹화를 시작하면 보관 원본을 비웁니다. 현재 녹화를 "
+                        u8"남기려면 취소한 뒤 저장하세요."
+                    );
+                    return;
+                }
+
+                capture_.discard_recording();
+                state_.pending_recording = false;
+                state_.recording_saved = false;
+                state_.saved_summary.clear();
+                execute_command({ static_cast<std::uint32_t>(runtime_command::toggle_recording) });
+                return;
+            }
+
+            if (action == runtime_command::select_preset)
+            {
+                const int index { number(command.argument) };
+
+                if (index >= 0 && index < static_cast<int>(state_.settings.presets.size()))
+                {
+                    state_.preset_index = index;
+                    host_->post_app_message(luil::app_message { preset_menu_intent { false } });
+                    publish();
+                }
+
                 return;
             }
 
@@ -711,7 +858,7 @@ namespace chalkag {
 
             if (action == runtime_command::take_screenshot || action == runtime_command::toggle_recording)
             {
-                if (state_.pending_recording)
+                if (state_.pending_recording && action == runtime_command::toggle_recording)
                 {
                     fail(u8"보관한 녹화를 저장하고 비운 뒤 새 캡쳐를 시작하세요.");
                     return;
@@ -770,6 +917,8 @@ namespace chalkag {
                     }
 
                     state_.recording = true;
+                    state_.saved_summary.clear();
+                    state_.recording_saved = false;
                     started_ = std::chrono::steady_clock::now();
                     elapsed_ = -1;
                     state_.elapsed_seconds = 0;
@@ -781,6 +930,8 @@ namespace chalkag {
                 else
                 {
                     state_.busy = true;
+                    saving_recording_ = false;
+                    state_.save_cancel_requested = false;
                     reset_progress();
                     state_.status = u8"스크린샷 저장 중…";
                     publish();
@@ -907,6 +1058,35 @@ namespace chalkag {
                 }
 
                 next.presets.erase(next.presets.begin() + state_.preset_index);
+            }
+            else if (action == runtime_command::undo_delete_preset)
+            {
+                if (!deleted_preset_ || next.presets.size() >= 64)
+                {
+                    return;
+                }
+
+                if (std::any_of(next.presets.begin(), next.presets.end(), [&](const region_preset& preset) {
+                        return preset.name == deleted_preset_->name;
+                    }))
+                {
+                    return;
+                }
+
+                next.presets.insert(
+                    next.presets.begin()
+                        + static_cast<std::ptrdiff_t>(std::min(deleted_preset_index_, next.presets.size())),
+                    *deleted_preset_
+                );
+            }
+            else if (action == runtime_command::rename_preset)
+            {
+                if (next.presets.empty() || command.argument.empty())
+                {
+                    return;
+                }
+
+                next.presets[static_cast<std::size_t>(state_.preset_index)].name = command.argument;
             }
             else if (action == runtime_command::set_fps)
             {
@@ -1073,7 +1253,24 @@ namespace chalkag {
                 return;
             }
 
+            if (action == runtime_command::delete_preset)
+            {
+                deleted_preset_ = state_.settings.presets[static_cast<std::size_t>(state_.preset_index)];
+                deleted_preset_index_ = static_cast<std::size_t>(state_.preset_index);
+            }
             state_.settings = std::move(next);
+
+            if (action == runtime_command::delete_preset)
+            {
+                state_.can_undo_delete = true;
+            }
+            else if (action == runtime_command::undo_delete_preset)
+            {
+                deleted_preset_.reset();
+                state_.can_undo_delete = false;
+                state_.preset_index
+                    = static_cast<int>(std::min(deleted_preset_index_, state_.settings.presets.size() - 1));
+            }
 
             if (action == runtime_command::set_glow_width || action == runtime_command::adjust_glow_width)
             {
@@ -1248,6 +1445,12 @@ namespace chalkag {
                 }
 
                 state_.busy = false;
+                const bool cancelled { state_.save_cancel_requested };
+                if (cancelled)
+                {
+                    capture_.reset_save_cancel();
+                }
+                state_.save_cancel_requested = false;
                 restore_capture_windows();
                 state_.pending_recording = capture_.has_pending_recording();
                 state_.recorded_region = capture_.recorded_region();
@@ -1257,30 +1460,41 @@ namespace chalkag {
                 {
                     state_.saved_output = result.output;
 
-                    std::error_code error;
-                    const auto bytes { std::filesystem::file_size(result.output, error) };
-
-                    if (error)
+                    if (saving_recording_)
                     {
-                        state_.saved_summary = u8"저장 완료 · 파일 크기를 읽을 수 없습니다";
+                        state_.recording_saved = true;
                     }
-                    else
+
+                    if (saving_recording_ || !state_.pending_recording)
                     {
-                        const auto unit { bytes >= 1048576 ? u8" MiB" : bytes >= 1024 ? u8" KiB" : u8" B" };
-                        const double factor { bytes >= 1048576 ? 1048576.0 : bytes >= 1024 ? 1024.0 : 1.0 };
-                        auto size { std::to_string(static_cast<double>(bytes) / factor) };
-                        size.resize(size.find('.') + (factor == 1 ? 0 : 3));
-                        state_.saved_summary = u8"마지막 저장 · " + std::u8string { size.begin(), size.end() } + unit;
+                        std::error_code error;
+                        const auto bytes { std::filesystem::file_size(result.output, error) };
+
+                        if (error)
+                        {
+                            state_.saved_summary = u8"저장 완료 · 파일 크기를 읽을 수 없습니다";
+                        }
+                        else
+                        {
+                            const auto unit { bytes >= 1048576 ? u8" MiB" : bytes >= 1024 ? u8" KiB" : u8" B" };
+                            const double factor { bytes >= 1048576 ? 1048576.0 : bytes >= 1024 ? 1024.0 : 1.0 };
+                            auto size { std::to_string(static_cast<double>(bytes) / factor) };
+                            size.resize(size.find('.') + (factor == 1 ? 0 : 3));
+                            state_.saved_summary
+                                = u8"마지막 저장 · " + std::u8string { size.begin(), size.end() } + unit;
+                        }
                     }
                 }
 
                 state_.status = result.message;
                 publish();
 
-                if (!result.success)
+                if (!result.success && !cancelled)
                 {
                     fail(result.message);
                 }
+
+                saving_recording_ = false;
             }
 
             if (state_.recording && capture_.recording_failed() && !state_.busy)
@@ -1561,35 +1775,7 @@ namespace chalkag {
                 }
             }
 
-            if (message == WM_CLOSE && self->host_ != nullptr && !self->approved_close_)
-            {
-                try
-                {
-                    if (self->state_.busy || self->state_.recording)
-                    {
-                        self->show_dialog(
-                            message_dialog_kind::information, u8"작업 진행 중", u8"촬영·저장을 마친 뒤 종료하세요."
-                        );
-                        return 0;
-                    }
-
-                    if (self->state_.pending_recording)
-                    {
-                        self->show_dialog(
-                            message_dialog_kind::exit_application,
-                            u8"종료할까요?",
-                            u8"보관한 녹화 원본을 비우고 종료합니다.\n이미 저장한 파일은 유지됩니다."
-                        );
-                        return 0;
-                    }
-                }
-                catch (...)
-                {
-                    return 0;
-                }
-            }
-
-            if (message == WM_CLOSE || message == WM_DESTROY || (message == WM_ENDSESSION && wparam != 0))
+            if (message == WM_DESTROY || (message == WM_ENDSESSION && wparam != 0))
             {
                 self->shutdown();
             }
@@ -1633,6 +1819,9 @@ namespace chalkag {
         luil::app_host* host_ {};
         HWND owner_ {};
         global_hotkeys hotkeys_;
+        bool saving_recording_ {};
+        std::optional<region_preset> deleted_preset_ {};
+        std::size_t deleted_preset_index_ {};
 
         std::filesystem::path directory_ {};
         settings_store store_;
@@ -1644,7 +1833,6 @@ namespace chalkag {
         std::mutex progress_mutex_ {};
         save_progress worker_progress_ {};
         bool owner_hidden_ {};
-        bool approved_close_ {};
         bool tracking_position_ {};
         bool moving_window_ {};
         bool position_dirty_ {};

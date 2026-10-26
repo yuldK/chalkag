@@ -131,6 +131,10 @@ namespace chalkag {
         class screen_frame
         {
         public:
+            explicit screen_frame(capture_frame_source source = {})
+                : source_ { std::move(source) }
+            {}
+
             bool initialize(capture_region region, capture_options options)
             {
                 region_ = region;
@@ -142,11 +146,22 @@ namespace chalkag {
                     std::max<std::int64_t>(1, static_cast<std::int64_t>(region.height) * options.output_percent / 100)
                 );
                 scaled_ = width_ != region.width || height_ != region.height;
+                if (source_)
+                {
+                    return true;
+                }
+
                 return original_.create(region.width, region.height) && (!scaled_ || resized_.create(width_, height_));
             }
 
             bool read()
             {
+                if (source_)
+                {
+                    return source_(region_, options_, supplied_) && supplied_.width() == width_
+                        && supplied_.height() == height_ && supplied_.colorType() == kBGRA_8888_SkColorType;
+                }
+
                 if (!BitBlt(
                         original_.memory,
                         0,
@@ -238,6 +253,11 @@ namespace chalkag {
 
             SkPixmap pixels() const
             {
+                if (source_)
+                {
+                    return supplied_.pixmap();
+                }
+
                 return { SkImageInfo::Make(width_, height_, kBGRA_8888_SkColorType, kOpaque_SkAlphaType),
                          scaled_ ? resized_.pixels : original_.pixels,
                          static_cast<std::size_t>(width_) * 4
@@ -245,6 +265,8 @@ namespace chalkag {
             }
 
         private:
+            capture_frame_source source_ {};
+            SkBitmap supplied_ {};
             screen_bitmap original_ {};
             screen_bitmap resized_ {};
 
@@ -261,10 +283,11 @@ namespace chalkag {
             capture_options options,
             image_format format,
             const std::atomic<bool>& cancelled,
-            const progress_callback& progress
+            const progress_callback& progress,
+            const capture_frame_source& source
         )
         {
-            screen_frame frame {};
+            screen_frame frame { source };
 
             if (cancelled.load() || !frame.initialize(region, options) || !frame.read())
             {
@@ -310,6 +333,7 @@ namespace chalkag {
     struct image_capture::implementation
     {
         std::filesystem::path directory;
+        capture_frame_source frame_source {};
         std::filesystem::path session;
         std::shared_ptr<void> storage {};
         std::filesystem::path output;
@@ -317,6 +341,7 @@ namespace chalkag {
         std::atomic<bool> stop_requested {};
         std::atomic<std::int64_t> stop_nanoseconds {};
         std::atomic<bool> cancelled {};
+        std::atomic<bool> shutdown_requested {};
         std::atomic<bool> failed {};
         std::thread worker;
         std::mutex mutex;
@@ -329,8 +354,9 @@ namespace chalkag {
         capture_region original_region {};
         std::vector<encoded_animation_frame> frames;
 
-        explicit implementation(std::filesystem::path executable_directory)
+        explicit implementation(std::filesystem::path executable_directory, capture_frame_source source = {})
             : directory { std::filesystem::absolute(std::move(executable_directory)) }
+            , frame_source { std::move(source) }
         {}
 
         bool prepare(image_format format)
@@ -413,9 +439,9 @@ namespace chalkag {
             }
         };
 
-        capture_result publish(const std::filesystem::path& temporary)
+        capture_result publish(const std::filesystem::path& temporary, const std::atomic<bool>* cancellation = nullptr)
         {
-            if (cancelled.load())
+            if (cancellation ? cancellation->load() : cancelled.load())
             {
                 return failure(u8"캡처 작업을 취소했습니다.");
             }
@@ -457,7 +483,7 @@ namespace chalkag {
                 // 출력 배율과 무관하게 원본 크기로 수집해야 정지 뒤 다른 크기로 다시 저장할 수 있다.
                 capture_options raw_options { options };
                 raw_options.output_percent = 100;
-                screen_frame buffer {};
+                screen_frame buffer { frame_source };
 
                 if (!buffer.initialize(region, raw_options))
                 {
@@ -553,8 +579,8 @@ namespace chalkag {
         }
     };
 
-    image_capture::image_capture(std::filesystem::path executable_directory)
-        : implementation_ { std::make_unique<implementation>(std::move(executable_directory)) }
+    image_capture::image_capture(std::filesystem::path executable_directory, capture_frame_source frame_source)
+        : implementation_ { std::make_unique<implementation>(std::move(executable_directory), std::move(frame_source)) }
     {}
 
     image_capture::~image_capture()
@@ -566,16 +592,17 @@ namespace chalkag {
         capture_region region, capture_options options, const progress_callback& progress
     )
     {
-        auto& state { *implementation_ };
+        auto& recording_state { *implementation_ };
+        implementation state { recording_state.directory, recording_state.frame_source };
 
-        if (state.cancelled.load())
+        if (recording_state.cancelled.load())
         {
             return failure(u8"캡처 작업을 취소했습니다.");
         }
 
-        if (recording() || has_pending_recording())
+        if (recording())
         {
-            return failure(u8"녹화 중이거나 보관한 녹화가 있습니다. 먼저 녹화를 비우세요.");
+            return failure(u8"녹화 중에는 사진을 찍을 수 없습니다.");
         }
 
         if (!valid_options(region, options)
@@ -601,7 +628,9 @@ namespace chalkag {
                             / (options.still_format == image_format::png ? L"still.png" : L"still.webp")
         };
 
-        if (!save_native(native, region, options, options.still_format, state.cancelled, progress))
+        if (!save_native(
+                native, region, options, options.still_format, recording_state.cancelled, progress, state.frame_source
+            ))
         {
             return failure(u8"화면을 캡처하거나 이미지를 저장할 수 없습니다.");
         }
@@ -613,7 +642,7 @@ namespace chalkag {
             std::u8string message;
 
             if (!optimize_webp_frames(
-                    frames, state.cancelled, message, progress, { .compression = options.compression }
+                    frames, recording_state.cancelled, message, progress, { .compression = options.compression }
                 ))
             {
                 return failure(std::move(message));
@@ -622,7 +651,7 @@ namespace chalkag {
 
         report_progress(progress, save_stage::publishing);
 
-        const auto result { state.publish(native) };
+        const auto result { state.publish(native, &recording_state.cancelled) };
 
         if (result.success)
         {
@@ -703,7 +732,7 @@ namespace chalkag {
         state.worker.join();
         implementation::cleanup_scope cleanup { state };
 
-        if (state.cancelled.load())
+        if (state.shutdown_requested.load())
         {
             return failure(u8"녹화를 취소했습니다.");
         }
@@ -866,8 +895,19 @@ namespace chalkag {
 
     void image_capture::request_cancel() noexcept
     {
+        implementation_->shutdown_requested = true;
         implementation_->cancelled = true;
         implementation_->request_stop();
+    }
+
+    void image_capture::request_save_cancel() noexcept
+    {
+        implementation_->cancelled = true;
+    }
+
+    void image_capture::reset_save_cancel() noexcept
+    {
+        implementation_->cancelled = implementation_->shutdown_requested.load();
     }
 
     void image_capture::cancel_recording()

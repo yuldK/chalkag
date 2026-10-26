@@ -51,7 +51,14 @@ namespace chalkag {
         preview_output,
         scroll,
         zoom,
-        sidebar_scroll
+        sidebar_scroll,
+        request_exit,
+        keep_editing,
+        discard_changes,
+        reset_inputs,
+        webp_mode,
+        webp_quality,
+        compression
     };
 
     struct animation_editor_intent
@@ -94,6 +101,10 @@ namespace chalkag {
         [[nodiscard]] std::optional<std::chrono::steady_clock::time_point> next_tick() const;
         void tick(std::chrono::steady_clock::time_point now);
         void cancel() noexcept;
+        [[nodiscard]] bool has_unsaved_changes() const;
+        [[nodiscard]] bool has_pending_inputs() const;
+        [[nodiscard]] bool confirmation_open() const noexcept;
+        [[nodiscard]] std::optional<luil::ui_popup> confirmation(float scale) const;
 
     private:
         struct work_result
@@ -126,6 +137,11 @@ namespace chalkag {
         animation_editor_metrics metrics_ { 1040, 760, 1 };
         std::shared_ptr<animation_document> document_ {};
         animation_edit edit_ {};
+        animation_edit saved_edit_ {};
+        std::optional<open_animation_editor_intent> pending_open_ {};
+        bool confirm_exit_ {};
+        bool confirming_ {};
+        std::filesystem::path last_output_ {};
         animation_edit reduced_preview_ {};
         std::vector<std::int64_t> timeline_ {};
         int minimum_delay_ { 1 };

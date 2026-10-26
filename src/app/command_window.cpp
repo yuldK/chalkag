@@ -5,12 +5,14 @@
 #include "capture/recording_time.h"
 
 #include "luil/generated/codicons.h"
+#include "luil/ui/badge_element.h"
 #include "luil/ui/button_element.h"
 #include "luil/ui/check_element.h"
 #include "luil/ui/choice_group_element.h"
 #include "luil/ui/dialog_elements.h"
 #include "luil/ui/dropdown_element.h"
 #include "luil/ui/label_element.h"
+#include "luil/ui/list_element.h"
 #include "luil/ui/menu_element.h"
 #include "luil/ui/panel_element.h"
 #include "luil/ui/progress_element.h"
@@ -18,6 +20,8 @@
 #include "luil/ui/scroll_area_element.h"
 #include "luil/ui/slider_element.h"
 #include "luil/ui/tab_bar_element.h"
+#include "luil/ui/theme_picker_element.h"
+#include "luil/ui/toast_element.h"
 #include "luil/ui/ui_tree.h"
 
 #include <algorithm>
@@ -109,9 +113,7 @@ namespace chalkag {
             void add(std::unique_ptr<luil::ui_element> element)
             {
                 const auto box { element->bounds() };
-                slots_.push_back(
-                    { box.x / scale_, box.y / scale_ - command_window_height, box.width / scale_, box.height / scale_ }
-                );
+                slots_.push_back({ box.x / scale_, box.y / scale_ - 196.0f, box.width / scale_, box.height / scale_ });
                 add_child(std::move(element));
             }
 
@@ -149,6 +151,7 @@ namespace chalkag {
         {
             static const auto style = [] {
                 auto value { luil::default_ui_style() };
+                value.tab_bar.variant = luil::tab_bar_variant::connected;
                 value.metrics.control_corner_radius = 7.0f;
                 value.metrics.row_corner_radius = 7.0f;
                 value.light.window_background = luil::make_ui_color(255, 255, 255);
@@ -329,6 +332,33 @@ namespace chalkag {
 
     void command_driver::handle(luil::app_message message)
     {
+        if (message.get<revert_shortcuts_intent>())
+        {
+            shortcuts_.reset(runtime_state_.settings.shortcuts);
+            shortcuts_edited_ = false;
+            return;
+        }
+        if (const auto* menu { message.get<preset_menu_intent>() })
+        {
+            preset_menu_open_ = menu->open;
+            return;
+        }
+        if (const auto* scroll { message.get<preset_scroll_intent>() })
+        {
+            preset_scroll_ = scroll->absolute ? scroll->value : preset_scroll_ + scroll->value;
+            return;
+        }
+        if (const auto* edit { message.get<preset_name_edit_intent>() })
+        {
+            luil::apply_text_edit(preset_name_, edit->request);
+            return;
+        }
+        if (const auto* composition { message.get<preset_name_composition_intent>() })
+        {
+            preset_composition_ = composition->event.composing ? std::optional { composition->event } : std::nullopt;
+            return;
+        }
+
         if (animation_editor_.handle(message))
         {
             return;
@@ -345,9 +375,8 @@ namespace chalkag {
         if (const auto* const tab { message.get<options_tab_intent>() }; tab != nullptr)
         {
             page_ = tab->page;
+            preset_menu_open_ = false;
             options_scroll_ = 0;
-            shortcuts_.reset(runtime_state_.settings.shortcuts);
-            shortcuts_edited_ = false;
             fps_menu_open_ = false;
             help_dismissed_ = true;
             return;
@@ -422,15 +451,31 @@ namespace chalkag {
         {
             const bool applied { runtime_state_.shortcut_revision != state->shortcut_revision };
 
-            if (applied || !state->options_open)
+            if (applied && state->shortcut_error.empty())
             {
                 shortcuts_edited_ = false;
             }
 
-            if (runtime_state_.settings.shortcuts != state->settings.shortcuts || !state->options_open
+            if (runtime_state_.settings.shortcuts != state->settings.shortcuts
                 || (applied && state->shortcut_error.empty()))
             {
                 shortcuts_.reset(state->settings.shortcuts);
+            }
+
+            const auto preset_name {
+                state->settings.presets.empty()
+                    ? std::u8string {}
+                    : state->settings.presets[static_cast<std::size_t>(state->preset_index)].name
+            };
+            if (preset_name != preset_name_source_)
+            {
+                preset_name_source_ = preset_name;
+                luil::text::text_edit_set_text(preset_name_, preset_name, true);
+                preset_composition_.reset();
+            }
+            if (runtime_state_.preset_index != state->preset_index)
+            {
+                preset_menu_open_ = false;
             }
 
             runtime_state_ = *state;
@@ -513,9 +558,7 @@ namespace chalkag {
                                   u8"애니메이션 녹화 / 정지",
                                   luil::codicons::icon_record
             },
-            command_description {
-                runtime_command::discard_recording, u8"toolbar-discard-recording", u8"녹화 비우기", 0
-            },
+            command_description { runtime_command::new_recording, u8"toolbar-discard-recording", u8"새 녹화", 0 },
             command_description { runtime_command::toggle_options,
                                   u8"open-options",
                                   u8"옵션 / 영역 프리셋",
@@ -529,7 +572,7 @@ namespace chalkag {
 
         for (const command_description& command : commands)
         {
-            if (command.command == runtime_command::discard_recording
+            if (command.command == runtime_command::new_recording
                 && (!runtime_state_.pending_recording || runtime_state_.recording))
             {
                 continue;
@@ -569,8 +612,8 @@ namespace chalkag {
                 luil::text_button_config record_config {};
 
                 record_config.text = runtime_state_.recording ? u8"정지"
-                    : runtime_state_.pending_recording        ? u8"저장"
-                                                              : u8"녹화";
+                    : runtime_state_.pending_recording ? (runtime_state_.recording_saved ? u8"다시 저장" : u8"저장")
+                                                       : u8"녹화";
 
                 record_config.glyph
                     = runtime_state_.pending_recording ? luil::codicons::icon_save : button_config.glyph;
@@ -581,11 +624,26 @@ namespace chalkag {
                     luil::ui_element_id { command_kind, command.owner }, std::move(record_config)
                 );
             }
-            else if (command.command == runtime_command::discard_recording)
+            else if (command.command == runtime_command::new_recording)
             {
                 button = std::make_unique<luil::text_button_element>(
                     luil::ui_element_id { command_kind, command.owner },
-                    luil::text_button_config { .text = u8"비우기", .visual = luil::text_button_visual::normal }
+                    luil::text_button_config { .text = u8"새 녹화", .visual = luil::text_button_visual::normal }
+                );
+            }
+            else if (
+                command.command == runtime_command::select_region || command.command == runtime_command::take_screenshot
+            )
+            {
+                button = std::make_unique<luil::text_button_element>(
+                    luil::ui_element_id { command_kind, command.owner },
+                    luil::text_button_config {
+                        .text = command.command == runtime_command::select_region ? u8"영역 선택" : u8"사진",
+                        .visual = command.command == runtime_command::select_region && !region_state_.region
+                            ? luil::text_button_visual::accent
+                            : luil::text_button_visual::normal,
+                        .glyph = command.glyph
+                    }
                 );
             }
             else
@@ -630,7 +688,7 @@ namespace chalkag {
             {
                 button->set_enabled(runtime_state_.settings_writable);
             }
-            else if (command.command == runtime_command::discard_recording)
+            else if (command.command == runtime_command::new_recording)
             {
                 button->set_enabled(
                     !runtime_state_.busy && !runtime_state_.recording && runtime_state_.pending_recording
@@ -643,7 +701,7 @@ namespace chalkag {
                 };
 
                 const bool can_shoot { command.command != runtime_command::take_screenshot
-                                       || (!runtime_state_.recording && !runtime_state_.pending_recording)
+                                       || !runtime_state_.recording
                 };
 
                 const bool can_record { true };
@@ -659,6 +717,11 @@ namespace chalkag {
             }
 
             help_content content { .title = button->accessibility().name };
+            if (command.command == runtime_command::select_region
+                || command.command == runtime_command::take_screenshot)
+            {
+                content.title = command.name;
+            }
 
             if (command.command == runtime_command::select_region)
             {
@@ -682,9 +745,11 @@ namespace chalkag {
             }
             else if (command.command == runtime_command::toggle_recording)
             {
-                content.shortcut = format_hotkey(runtime_state_.settings.shortcuts[2]);
+                content.shortcut = runtime_state_.pending_recording
+                    ? std::u8string {}
+                    : format_hotkey(runtime_state_.settings.shortcuts[2]);
 
-                if (!content.shortcut.empty())
+                if (!runtime_state_.pending_recording && !content.shortcut.empty())
                 {
                     content.shortcut += u8" · 다시 누르면 정지";
                 }
@@ -695,11 +760,10 @@ namespace chalkag {
                     : u8"선택한 영역을 애니메이션 이미지로 녹화합니다.\n정지 후 원본을 보관합니다. 저장 버튼을 누르면 "
                       u8"현재 옵션으로 저장합니다.";
             }
-            else if (command.command == runtime_command::discard_recording)
+            else if (command.command == runtime_command::new_recording)
             {
-                content.shortcut = format_hotkey(runtime_state_.settings.shortcuts[3]);
-                content.body = u8"보관한 녹화 원본을 비우고 새 녹화를 준비합니다.\n확인 후 비우며, 이미 저장한 파일은 "
-                               u8"유지됩니다.";
+                content.body
+                    = u8"새 녹화를 시작합니다. 저장한 원본은 바로 교체하고, 미저장 원본은 교체 전에 확인합니다.";
             }
             else if (command.command == runtime_command::toggle_always_on_top)
             {
@@ -729,9 +793,11 @@ namespace chalkag {
 
             help.emplace(command.owner, std::move(content));
 
-            const float button_width { command.command == runtime_command::toggle_recording        ? 78.0f
-                                           : command.command == runtime_command::discard_recording ? 64.0f
-                                                                                                   : 36.0f
+            const float button_width { command.command == runtime_command::toggle_recording      ? 94.0f
+                                           : command.command == runtime_command::new_recording   ? 88.0f
+                                           : command.command == runtime_command::select_region   ? 100.0f
+                                           : command.command == runtime_command::take_screenshot ? 70.0f
+                                                                                                 : 36.0f
             };
 
             if (command.command == runtime_command::toggle_always_on_top)
@@ -822,6 +888,132 @@ namespace chalkag {
             }
         }
 
+        const auto quick_button = [&](const char8_t* owner,
+                                      const char8_t* text,
+                                      const runtime_command action,
+                                      const float x,
+                                      const float y,
+                                      const float button_width,
+                                      const bool enabled) {
+            auto element { std::make_unique<luil::text_button_element>(
+                luil::ui_element_id { command_kind, owner },
+                luil::text_button_config { .text = text, .visual = luil::text_button_visual::link }
+            )
+            };
+            element->set_action(
+                luil::ui_trigger::left_click,
+                [action](const luil::ui_action_context&) -> std::vector<luil::input_action> {
+                    return { luil::app_ui_command { static_cast<std::uint32_t>(action) } };
+                }
+            );
+            element->set_cursor(luil::ui_cursor::hand);
+            element->set_enabled(enabled && runtime_state_.dialog.kind == message_dialog_kind::none);
+            element->arrange({ { x * scale, y * scale, button_width * scale, 28 * scale }, scale });
+            root->add(std::move(element));
+        };
+        quick_button(
+            u8"quick-open-image",
+            u8"이미지 열기",
+            runtime_command::open_animation,
+            12,
+            82,
+            96,
+            !runtime_state_.busy && !runtime_state_.recording
+        );
+        if (runtime_state_.pending_recording)
+        {
+            quick_button(
+                u8"quick-edit-recording",
+                u8"녹화 편집",
+                runtime_command::edit_recording,
+                120,
+                82,
+                90,
+                !runtime_state_.busy && !runtime_state_.recording
+            );
+        }
+        if (runtime_state_.busy)
+        {
+            quick_button(
+                u8"cancel-save",
+                runtime_state_.save_cancel_requested ? u8"취소 중…" : u8"저장 취소",
+                runtime_command::cancel_save,
+                width / scale - 108,
+                82,
+                96,
+                !runtime_state_.save_cancel_requested
+            );
+        }
+        else
+        {
+            const std::u8string state_text { runtime_state_.recording ? u8"녹화 중"
+                                                 : runtime_state_.pending_recording
+                                                 ? (runtime_state_.recording_saved ? u8"저장됨 · 원본 보관"
+                                                                                   : u8"저장 전 · 원본 보관")
+                                                 : region_state_.region ? u8"촬영 준비됨"
+                                                                        : u8"영역 선택부터 시작"
+            };
+            auto badge { std::make_unique<luil::badge_element>(
+                luil::ui_element_id { command_kind, u8"capture-state" },
+                luil::badge_config { .text = state_text,
+                                     .tone = runtime_state_.pending_recording && !runtime_state_.recording_saved
+                                         ? luil::badge_tone::warning
+                                         : luil::badge_tone::accent
+                }
+            )
+            };
+            badge->arrange({ { width - 174 * scale, 86 * scale, 162 * scale, 24 * scale }, scale });
+            root->add(std::move(badge));
+        }
+        if (!runtime_state_.saved_output.empty() && !runtime_state_.busy && !runtime_state_.recording)
+        {
+            luil::toast_config result {};
+            result.id = u8"saved-result";
+            result.text
+                = runtime_state_.pending_recording && !runtime_state_.recording_saved ? u8"마지막 저장" : u8"저장 완료";
+            result.severity = luil::toast_severity::success;
+            result.action_label = {};
+            result.action = [](const luil::ui_action_context&) -> std::vector<luil::input_action> {
+                return { luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::open_saved_file) } };
+            };
+            auto toast { std::make_unique<luil::toast_element>(std::move(result)) };
+            toast->arrange({ { 12 * scale, 122 * scale, 112 * scale, 40 * scale }, scale });
+            root->add(std::move(toast));
+            const auto filename { runtime_state_.saved_output.filename().u8string() };
+            quick_button(
+                u8"saved-file", filename.c_str(), runtime_command::open_saved_file, 136, 128, width / scale - 264, true
+            );
+            help[u8"saved-file"] = { .title = u8"저장 파일 열기", .body = runtime_state_.saved_output.u8string() };
+            quick_button(
+                u8"output-folder",
+                u8"저장 폴더 열기",
+                runtime_command::open_output_folder,
+                width / scale - 110,
+                128,
+                102,
+                true
+            );
+        }
+        else
+        {
+            const auto status { !runtime_state_.settings_writable
+                                    ? std::u8string { u8"설정을 읽을 수 없습니다 · data/settings.json을 확인하세요." }
+                                    : !runtime_state_.shortcut_error.empty()
+                                    ? std::u8string { u8"단축키 등록 확인 필요 · 앱 설정에서 조합을 변경하세요." }
+                                    : !region_state_.region && !runtime_state_.busy
+                                    ? std::u8string { u8"① 영역 선택 → ② 사진 또는 녹화 → ③ 저장" }
+                                    : runtime_state_.status
+            };
+            auto label { std::make_unique<luil::label_element>(
+                luil::ui_element_id { command_kind, u8"command-status" },
+                luil::label_config { .text = status, .font_size = 11, .wrap = true, .max_lines = 2 }
+            )
+            };
+            label->set_tooltip(status);
+            label->arrange({ { 12 * scale, 122 * scale, width - 24 * scale, 44 * scale }, scale });
+            root->add(std::move(label));
+        }
+
         if (runtime_state_.options_open)
         {
             auto content_root { std::make_unique<options_content_element>(scale) };
@@ -830,6 +1022,7 @@ namespace chalkag {
             };
 
             const float content_width { width / scale - 40.0f };
+            const float header_offset { command_window_height - 82.0f };
             const auto value_text = [](const int value) -> std::u8string {
                 const std::string text { std::to_string(value) };
                 return { text.begin(), text.end() };
@@ -855,7 +1048,17 @@ namespace chalkag {
                     );
                     element->set_cursor(luil::ui_cursor::arrow);
                     element->arrange({ { x * scale, y * scale, length * scale, 38.0f * scale }, scale });
-                    content_root->add(std::move(element));
+                    if (y < 200)
+                    {
+                        element->arrange(
+                            { { x * scale, (y + header_offset) * scale, length * scale, 38 * scale }, scale }
+                        );
+                        root->add(std::move(element));
+                    }
+                    else
+                    {
+                        content_root->add(std::move(element));
+                    }
                     return;
                 }
 
@@ -865,7 +1068,15 @@ namespace chalkag {
                 );
                 element->set_cursor(luil::ui_cursor::arrow);
                 element->arrange({ { x * scale, y * scale, length * scale, 24.0f * scale }, scale });
-                content_root->add(std::move(element));
+                if (y < 200)
+                {
+                    element->arrange({ { x * scale, (y + header_offset) * scale, length * scale, 24 * scale }, scale });
+                    root->add(std::move(element));
+                }
+                else
+                {
+                    content_root->add(std::move(element));
+                }
             };
 
             const auto card = [&](const char8_t* owner, const float y, const float card_height) {
@@ -1000,14 +1211,27 @@ namespace chalkag {
             tabs.owner = u8"options-tabs";
             tabs.items = { { u8"capture", u8"캡쳐" },
                            { u8"region", u8"영역" },
-                           { u8"output", u8"저장" },
+                           { u8"output", u8"내보내기" },
                            { u8"preferences", u8"앱 설정" }
             };
             tabs.selected = page_ == options_page::region ? u8"region"
                 : page_ == options_page::output           ? u8"output"
                 : page_ == options_page::preferences      ? u8"preferences"
                                                           : u8"capture";
-            tabs.tab_width = 90.0f;
+            tabs.tab_width = content_width / 4;
+            tabs.min_tab_width = 80;
+            if (runtime_state_.pending_recording)
+            {
+                tabs.items[2].badge = luil::tab_badge {
+                    .text = runtime_state_.recording_saved ? u8"완료" : u8"1",
+                    .tone = runtime_state_.recording_saved ? luil::badge_tone::accent : luil::badge_tone::warning,
+                    .description = runtime_state_.recording_saved ? u8"저장됨" : u8"저장 전 녹화 1개"
+                };
+            }
+            if (shortcuts_edited_)
+            {
+                tabs.items[3].indicator = luil::tab_indicator { .description = u8"적용 전 단축키 변경" };
+            }
             tabs.select = [](const std::u8string& key) -> luil::input_action {
                 const auto page = key == u8"region" ? options_page::region
                     : key == u8"output"             ? options_page::output
@@ -1018,8 +1242,10 @@ namespace chalkag {
 
             auto tab_bar { std::make_unique<luil::tab_bar_element>(std::move(tabs)) };
             tab_bar->set_enabled(runtime_state_.dialog.kind == message_dialog_kind::none);
-            tab_bar->arrange({ { 20.0f * scale, 158.0f * scale, content_width * scale, 32.0f * scale }, scale });
-            content_root->add(std::move(tab_bar));
+            tab_bar->arrange(
+                { { 20.0f * scale, (158.0f + header_offset) * scale, content_width * scale, 32.0f * scale }, scale }
+            );
+            root->add(std::move(tab_bar));
 
             // 수집 옵션과 실제 출력 크기를 보여 주는 캡쳐 탭을 구성한다.
             if (page_ == options_page::capture)
@@ -1100,6 +1326,7 @@ namespace chalkag {
                 );
                 luil::slider_config slider {};
                 slider.maximum = 5.0f;
+                slider.magnets = { 0, 1, 2, 3, 4, 5 };
                 slider.value = runtime_state_.output_step;
 
                 const auto scale_command = [](const runtime_command action, const float value) -> luil::input_action {
@@ -1131,12 +1358,16 @@ namespace chalkag {
                 label(u8"scale-original", u8"원본 100%", 20 + (content_width - 12) * 0.6f - 27, 491, 80, 11);
                 label(u8"scale-max", u8"200%", width / scale - 58, 491, 40, 11);
                 card(u8"output-card", 528, 64);
-                label(u8"output-caption", u8"저장될 이미지", 32, 534, 180, 11);
+                label(
+                    u8"output-caption",
+                    runtime_state_.pending_recording ? u8"사진 · 현재 영역" : u8"저장될 이미지",
+                    32,
+                    534,
+                    180,
+                    11
+                );
 
-                const auto selected { runtime_state_.pending_recording
-                                          ? std::optional<capture_region> { runtime_state_.recorded_region }
-                                          : region_state_.region
-                };
+                const auto selected { region_state_.region };
 
                 const int percent { runtime_state_.settings.capture.output_percent };
                 const auto dimensions = selected ? value_text(selected->width * percent / 100) + u8" × "
@@ -1145,32 +1376,20 @@ namespace chalkag {
                 label(u8"output-dimensions", dimensions, 32, 559, 230, 18);
                 label(u8"aspect-note", u8"비율 유지", width / scale - 95, 553, 75, 11);
 
-                const bool webp { format == image_format::webp
-                                  || runtime_state_.settings.capture.still_format == image_format::webp
-                };
-                label(u8"compression-label", u8"WebP 압축", 20, 612, 110);
-
-                const auto compression { runtime_state_.settings.capture.compression };
-                choice(
-                    u8"compression",
-                    u8"WebP 저장 방식",
-                    { { u8"fast", u8"빠른 저장" }, { u8"small", u8"균형" }, { u8"maximum", u8"최대 압축" } },
-                    compression == lossless_compression::fast          ? u8"fast"
-                        : compression == lossless_compression::maximum ? u8"maximum"
-                                                                       : u8"small",
-                    runtime_command::set_compression,
-                    610,
-                    webp
+                text_button(
+                    u8"output-settings",
+                    u8"출력 품질·압축 설정 →",
+                    runtime_command::show_output_options,
+                    20,
+                    612,
+                    content_width,
+                    true
                 );
                 label(
-                    u8"compression-note",
-                    !webp                                           ? u8"WebP 선택 시 사용할 수 있습니다."
-                        : compression == lossless_compression::fast ? u8"후처리를 생략해 빠르게 저장합니다."
-                        : compression == lossless_compression::maximum
-                        ? u8"최대 압축은 저장에 오래 걸릴 수 있습니다."
-                        : u8"권장 · 저장 속도와 파일 크기의 균형을 맞춥니다.",
+                    u8"capture-export-note",
+                    u8"형식·크기·품질은 내보내기에서 함께 확인할 수 있습니다",
                     20,
-                    644,
+                    650,
                     content_width,
                     11
                 );
@@ -1227,15 +1446,55 @@ namespace chalkag {
                 const bool can_apply { !runtime_state_.settings.presets.empty() && !runtime_state_.busy
                                        && !runtime_state_.recording
                 };
-                text_button(u8"previous-preset", u8"이전", runtime_command::previous_preset, 20, 480, 68, can_apply);
-                text_button(u8"next-preset", u8"다음", runtime_command::next_preset, 96, 480, 68, can_apply);
+                luil::dropdown_config presets {};
+                presets.owner = u8"preset-picker";
+                presets.text = preset;
+                presets.placeholder = u8"프리셋 선택";
+                presets.open = preset_menu_open_;
+                presets.set_open = [](const bool open) { return luil::make_app_action(preset_menu_intent { open }); };
+                auto dropdown { std::make_unique<luil::dropdown_element>(std::move(presets)) };
+                dropdown->set_access_name(u8"영역 프리셋 선택");
+                dropdown->set_enabled(can_apply);
+                dropdown->arrange({ { 20 * scale, 470 * scale, content_width * scale, 32 * scale }, scale });
+                content_root->add(std::move(dropdown));
+                luil::text_input_config name_config {};
+                name_config.placeholder = u8"프리셋 이름";
+                auto name { std::make_unique<luil::text_input_element>(
+                    luil::ui_element_id { luil::application_element_kind(12), u8"preset-name-input" },
+                    luil::make_text_input_view(
+                        preset_name_, preset_composition_, static_cast<luil::text_input_target>(205)
+                    ),
+                    name_config
+                )
+                };
+                name->set_access_name(u8"프리셋 이름");
+                name->set_enabled(can_apply && editable);
+                name->arrange({ { 20 * scale, 512 * scale, (content_width - 100) * scale, 32 * scale }, scale });
+                content_root->add(std::move(name));
+                auto rename { std::make_unique<luil::text_button_element>(
+                    luil::ui_element_id { command_kind, u8"rename-preset" },
+                    luil::text_button_config { .text = u8"이름 변경" }
+                )
+                };
+                rename->set_enabled(can_apply && editable && !preset_name_.text.empty() && !preset_composition_);
+                rename->set_action(
+                    luil::ui_trigger::left_click,
+                    [text = preset_name_.text](const luil::ui_action_context&) -> std::vector<luil::input_action> {
+                        return { luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::rename_preset),
+                                                        text
+                        }
+                        };
+                    }
+                );
+                rename->arrange({ { (width / scale - 110) * scale, 512 * scale, 90 * scale, 32 * scale }, scale });
+                content_root->add(std::move(rename));
                 text_button(
                     u8"apply-preset",
-                    u8"이 영역 적용",
+                    u8"선택 영역 적용",
                     runtime_command::apply_preset,
-                    172,
-                    480,
-                    content_width - 152,
+                    20,
+                    554,
+                    content_width - 180,
                     can_apply,
                     luil::text_button_visual::accent
                 );
@@ -1243,21 +1502,33 @@ namespace chalkag {
                     u8"save-preset",
                     u8"현재 영역 저장",
                     runtime_command::save_preset,
-                    20,
-                    526,
-                    224,
-                    editable && selected.has_value() && !region_state_.selecting
+                    width / scale - 190,
+                    554,
+                    170,
+                    editable && selected.has_value()
                 );
                 text_button(
                     u8"delete-preset",
-                    u8"삭제",
+                    u8"프리셋 삭제",
                     runtime_command::delete_preset,
-                    254,
-                    526,
-                    content_width - 234,
+                    20,
+                    596,
+                    116,
                     can_apply && editable,
                     luil::text_button_visual::danger
                 );
+                if (runtime_state_.can_undo_delete)
+                {
+                    text_button(
+                        u8"undo-delete-preset",
+                        u8"삭제 취소",
+                        runtime_command::undo_delete_preset,
+                        148,
+                        596,
+                        116,
+                        editable
+                    );
+                }
                 luil::check_config topmost {};
                 topmost.owner = u8"always-on-top";
                 topmost.label = u8"명령창 항상 위";
@@ -1272,24 +1543,25 @@ namespace chalkag {
                 auto topmost_element { std::make_unique<luil::check_element>(std::move(topmost)) };
                 topmost_element->set_enabled(runtime_state_.settings_writable);
                 topmost_element->arrange(
-                    { { 20.0f * scale, 574.0f * scale, content_width * scale, luil::check_row_height * scale }, scale }
+                    { { 20.0f * scale, 642.0f * scale, content_width * scale, luil::check_row_height * scale }, scale }
                 );
                 content_root->add(std::move(topmost_element));
                 help[u8"always-on-top"]
                     = { .title = u8"명령창 항상 위",
                         .body = u8"명령창을 다른 창보다 위에 표시합니다. 설정은 재실행해도 유지됩니다."
                     };
-                label(u8"glow-label", u8"글로우 두께", 20, 618, 160);
+                label(u8"glow-label", u8"글로우 두께", 20, 682, 160);
                 label(
                     u8"glow-value",
                     value_text(runtime_state_.settings.glow_width) + u8" px",
                     width / scale - 80,
-                    618,
+                    682,
                     60
                 );
                 luil::slider_config glow {};
                 glow.minimum = 0;
                 glow.maximum = 40;
+                glow.magnets = { 0, 12, 24, 40 };
                 glow.value = runtime_state_.glow_position;
                 glow.change_to = [](const float value) -> luil::input_action {
                     const auto number { std::to_string(static_cast<int>(std::clamp(value, 0.0f, 40.0f) + 0.5f)) };
@@ -1309,6 +1581,7 @@ namespace chalkag {
                 )
                 };
                 slider->set_access_name(u8"프레임 글로우 두께 · 0~40px");
+                slider->set_tooltip(u8"프레임 글로우 두께 · 0~40px");
                 slider->set_enabled(editable);
                 slider->arrange({ { 20 * scale, 650 * scale, content_width * scale, 24 * scale }, scale });
                 content_root->add(std::move(slider));
@@ -1377,6 +1650,7 @@ namespace chalkag {
                 quality.minimum = 1;
                 quality.maximum = 100;
                 quality.value = runtime_state_.quality_position;
+                quality.magnets = { 50, 75, 80, 90, 100 };
 
                 const auto quality_command = [](const runtime_command action, const float value) -> luil::input_action {
                     const auto text { std::to_string(value) };
@@ -1394,6 +1668,7 @@ namespace chalkag {
                 )
                 };
                 slider->set_access_name(u8"WebP 손실 압축 품질 · 1~100");
+                slider->set_tooltip(u8"WebP 손실 압축 품질 · 1~100");
                 slider->set_enabled(editable && webp && !settings.capture.webp_lossless);
                 slider->arrange({ { 20 * scale, 446 * scale, content_width * scale, 24 * scale }, scale });
                 content_root->add(std::move(slider));
@@ -1402,6 +1677,65 @@ namespace chalkag {
                     .body = u8"낮을수록 파일이 작아지고 화질이 떨어집니다. 저장 후 품질이나 캡쳐 탭의 출력 크기를 바꿔 "
                             u8"다시 저장할 수 있습니다. 보관 원본에는 영향을 주지 않습니다.",
                 };
+
+                const auto source_region { runtime_state_.pending_recording
+                                               ? std::optional<capture_region> { runtime_state_.recorded_region }
+                                               : region_state_.region
+                };
+                const int output_percent { settings.capture.output_percent };
+                const auto output_dimensions {
+                    value_text(output_percent) + u8"% · "
+                    + (source_region ? value_text(source_region->width * output_percent / 100) + u8" × "
+                               + value_text(source_region->height * output_percent / 100) + u8" px"
+                                     : std::u8string { u8"영역을 선택하세요" })
+                };
+                label(u8"export-scale-label", u8"출력 크기", 20, 484, 110);
+                label(u8"export-output-dimensions", output_dimensions, 140, 484, content_width - 120);
+                luil::slider_config scale_config {};
+                scale_config.maximum = 5;
+                scale_config.value = runtime_state_.output_step;
+                scale_config.magnets = { 0, 1, 2, 3, 4, 5 };
+                const auto scale_action = [](const runtime_command command, const float value) -> luil::input_action {
+                    const auto text { std::to_string(value) };
+                    return luil::app_ui_command { static_cast<std::uint32_t>(command), { text.begin(), text.end() } };
+                };
+                scale_config.change
+                    = [scale_action](const float delta) { return scale_action(runtime_command::adjust_scale, delta); };
+                scale_config.change_to = [scale_action](const float value) {
+                    return scale_action(runtime_command::set_scale_index, value);
+                };
+                auto scale_slider { std::make_unique<output_slider_element>(scale_config) };
+                scale_slider->set_enabled(editable);
+                scale_slider->arrange({ { 20 * scale, 514 * scale, content_width * scale, 24 * scale }, scale });
+                content_root->add(std::move(scale_slider));
+                label(u8"export-scale-note", u8"25 · 50 · 75 · 100 · 150 · 200%", 20, 542, content_width, 11);
+
+                label(u8"compression-label", u8"압축 속도", 20, 576, 110);
+
+                const auto compression { settings.capture.compression };
+                choice(
+                    u8"compression",
+                    u8"WebP 저장 방식",
+                    { { u8"fast", u8"빠른 저장" }, { u8"small", u8"균형" }, { u8"maximum", u8"최대 압축" } },
+                    compression == lossless_compression::fast          ? u8"fast"
+                        : compression == lossless_compression::maximum ? u8"maximum"
+                                                                       : u8"small",
+                    runtime_command::set_compression,
+                    574,
+                    webp
+                );
+                label(
+                    u8"compression-note",
+                    !webp                                           ? u8"WebP 선택 시 사용할 수 있습니다."
+                        : compression == lossless_compression::fast ? u8"후처리를 생략해 빠르게 저장합니다."
+                        : compression == lossless_compression::maximum
+                        ? u8"최대 압축은 저장에 오래 걸릴 수 있습니다."
+                        : u8"권장 · 저장 속도와 파일 크기의 균형을 맞춥니다.",
+                    20,
+                    608,
+                    content_width,
+                    11
+                );
 
                 const auto check_box = [&](const char8_t* owner,
                                            const char8_t* text,
@@ -1428,14 +1762,14 @@ namespace chalkag {
                     u8"녹화 정지 시 바로 저장",
                     settings.auto_save,
                     runtime_command::toggle_auto_save,
-                    488
+                    642
                 );
                 text_button(
                     u8"save-recording",
                     u8"녹화 저장",
                     runtime_command::save_recording,
                     20,
-                    558,
+                    686,
                     224,
                     runtime_state_.pending_recording && !runtime_state_.busy,
                     luil::text_button_visual::accent
@@ -1445,7 +1779,7 @@ namespace chalkag {
                     u8"녹화 비우기",
                     runtime_command::discard_recording,
                     254,
-                    558,
+                    686,
                     content_width - 234,
                     runtime_state_.pending_recording && !runtime_state_.busy,
                     luil::text_button_visual::danger
@@ -1455,7 +1789,7 @@ namespace chalkag {
                     u8"보관 녹화 편집",
                     runtime_command::edit_recording,
                     20,
-                    648,
+                    770,
                     content_width,
                     runtime_state_.pending_recording && !runtime_state_.busy
                 );
@@ -1464,16 +1798,15 @@ namespace chalkag {
                     u8"이미지를 열어 편집",
                     runtime_command::show_animation_editor,
                     20,
-                    690,
+                    812,
                     content_width,
                     !runtime_state_.busy && !runtime_state_.recording
                 );
                 label(
                     u8"save-note",
-                    u8"원본은 저장 후에도 유지됩니다. 설정을 바꾸고 다시 저장할 수 있습니다. 새 촬영은 녹화 비우기 후 "
-                    u8"시작하세요.",
+                    u8"원본은 저장 후에도 유지됩니다. 새 녹화로 다음 촬영을 시작하세요.",
                     20,
-                    607,
+                    726,
                     content_width,
                     11,
                     true
@@ -1482,28 +1815,57 @@ namespace chalkag {
             else
             {
                 const auto& appearance { runtime_state_.settings.appearance };
-                label(u8"theme-label", u8"테마", 20, 208, 110, 14);
-                choice(
-                    u8"theme",
-                    u8"테마",
-                    { { u8"system", u8"시스템" }, { u8"light", u8"밝게" }, { u8"dark", u8"어둡게" } },
-                    std::u8string { luil::theme_preference_name(appearance.theme) },
-                    runtime_command::set_theme,
-                    208
+                luil::theme_picker_config picker {};
+                picker.owner = u8"theme";
+                picker.selected = appearance.theme;
+                picker.accent_id = appearance.accent_id;
+                picker.card_width = (content_width - 24) / 3;
+                picker.preview_height = 48;
+                picker.select = [](const luil::theme_preference theme) -> luil::input_action {
+                    return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::set_theme),
+                                                  std::u8string { luil::theme_preference_name(theme) }
+                    };
+                };
+                auto themes { std::make_unique<luil::theme_picker_element>(picker) };
+                themes->set_enabled(editable);
+                themes->arrange(
+                    { { 20 * scale,
+                        208 * scale,
+                        content_width * scale,
+                        luil::theme_picker_element::height_for(picker, content_width) * scale
+                    },
+                      scale
+                    }
                 );
-                label(u8"appearance-note", u8"테마와 키 컬러는 즉시 반영하고 저장합니다", 20, 244, content_width, 11);
-                label(u8"accent-label", u8"키 컬러", 20, 276, 110, 14);
+                content_root->add(std::move(themes));
+                label(u8"appearance-note", u8"테마와 키 컬러는 즉시 반영하고 저장합니다", 20, 308, content_width, 11);
+                label(u8"accent-label", u8"키 컬러", 20, 340, 110, 14);
                 label(
                     u8"accent-name",
                     std::u8string { luil::accent_for(appearance.accent_id).label },
                     140,
-                    276,
+                    340,
                     content_width - 120
                 );
 
-                auto colors { std::make_unique<accent_picker_element>(appearance.accent_id) };
+                luil::accent_picker_config color_config {};
+                color_config.owner = u8"accent-picker";
+                color_config.selected = appearance.accent_id;
+                color_config.name = u8"키 컬러";
+                color_config.select = [](const std::u8string& accent) -> luil::input_action {
+                    return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::set_accent), accent };
+                };
+                auto colors { std::make_unique<luil::accent_picker_element>(color_config) };
                 colors->set_enabled(editable);
-                colors->arrange({ { 20 * scale, 310 * scale, content_width * scale, 84 * scale }, scale });
+                colors->arrange(
+                    { { 20 * scale,
+                        374 * scale,
+                        content_width * scale,
+                        luil::accent_picker_element::height_for(color_config, content_width) * scale
+                    },
+                      scale
+                    }
+                );
 
                 for (const auto& element : colors->children())
                 {
@@ -1514,11 +1876,11 @@ namespace chalkag {
                 }
 
                 content_root->add(std::move(colors));
-                label(u8"shortcuts-heading", u8"단축키", 20, 410, content_width, 14);
+                label(u8"shortcuts-heading", u8"단축키", 20, 490, content_width, 14);
                 shortcuts_.add_inputs(
                     [&](std::unique_ptr<luil::ui_element> element) { content_root->add(std::move(element)); },
                     width / scale,
-                    446,
+                    526,
                     scale,
                     editable
                 );
@@ -1555,10 +1917,20 @@ namespace chalkag {
                             };
                         }
                     );
-                    element->arrange({ { x * scale, 598 * scale, 114 * scale, 32 * scale }, scale });
+                    element->arrange({ { x * scale, 678 * scale, 114 * scale, 32 * scale }, scale });
                     content_root->add(std::move(element));
                 };
                 add_button(u8"reset-shortcuts", u8"기본값", 20, false);
+                auto revert { std::make_unique<luil::text_button_element>(
+                    luil::ui_element_id { command_kind, u8"revert-shortcuts" },
+                    luil::text_button_config { .text = u8"변경 취소" }
+                )
+                };
+                revert->set_enabled(editable && shortcuts_edited_);
+                revert->set_action(luil::ui_trigger::left_click, luil::make_message_action(revert_shortcuts_intent {}));
+                revert->arrange({ { 158 * scale, 678 * scale, 114 * scale, 32 * scale }, scale });
+                content_root->add(std::move(revert));
+
                 add_button(u8"apply-shortcuts", u8"단축키 적용", width / scale - 134, true);
 
                 const auto error { shortcuts_.error() };
@@ -1566,16 +1938,17 @@ namespace chalkag {
                     u8"shortcut-error",
                     error.empty() ? (shortcuts_edited_ ? std::u8string {} : runtime_state_.shortcut_error) : error,
                     20,
-                    640,
+                    720,
                     content_width,
                     11,
                     true
                 );
                 label(
                     u8"shortcut-help",
-                    u8"Ctrl+Alt+F9처럼 조합을 입력하세요.\n비워 두면 사용하지 않습니다. 기본값도 적용해야 저장됩니다.",
+                    shortcuts_edited_ ? u8"적용 전 변경이 있습니다. 탭을 이동해도 입력은 유지됩니다."
+                                      : u8"Ctrl+Alt+F9처럼 입력 후 적용하세요. 빈 값은 사용하지 않습니다.",
                     20,
-                    682,
+                    762,
                     content_width,
                     11,
                     true
@@ -1598,77 +1971,38 @@ namespace chalkag {
                 auto cursor_element { std::make_unique<luil::check_element>(std::move(cursor)) };
                 cursor_element->set_enabled(editable && !runtime_state_.pending_recording);
                 cursor_element->arrange(
-                    { { 20.0f * scale, 680.0f * scale, 260.0f * scale, luil::check_row_height * scale }, scale }
+                    { { 20.0f * scale,
+                        (page_ == options_page::region ? 758.0f : 680.0f) * scale,
+                        260.0f * scale,
+                        luil::check_row_height * scale
+                    },
+                      scale
+                    }
                 );
                 content_root->add(std::move(cursor_element));
             }
 
-            label(u8"runtime-status", runtime_state_.status, 20, 722, content_width, 11, true);
-
-            if (!runtime_state_.saved_output.empty())
-            {
-                const auto filename { runtime_state_.saved_output.filename().u8string() };
-                luil::text_button_config file_config {};
-
-                file_config.text = filename;
-                file_config.visual = luil::text_button_visual::link;
-                auto file { std::make_unique<luil::text_button_element>(
-                    luil::ui_element_id { command_kind, u8"saved-file" }, std::move(file_config)
-                )
-                };
-                file->set_cursor(luil::ui_cursor::hand);
-                file->set_enabled(runtime_state_.dialog.kind == message_dialog_kind::none);
-                file->set_action(
-                    luil::ui_trigger::left_click,
-                    [](const luil::ui_action_context&) -> std::vector<luil::input_action> {
-                        return { luil::app_ui_command {
-                            .command = static_cast<std::uint32_t>(runtime_command::open_saved_file)
-                        }
-                        };
-                    }
-                );
-                file->arrange({ { 20 * scale, 764 * scale, (content_width - 44) * scale, 32 * scale }, scale });
-                content_root->add(std::move(file));
-                help[u8"saved-file"]
-                    = { .title = u8"저장 파일 열기",
-                        .body = u8"기본 이미지 앱으로 엽니다.\n" + runtime_state_.saved_output.u8string()
-                    };
-            }
-
-            luil::button_config folder_config {};
-
-            folder_config.glyph = luil::codicons::icon_folder_opened;
-            folder_config.icon_size = 16;
-            folder_config.corner_radius = 6;
-            auto folder { std::make_unique<luil::button_element>(
-                luil::ui_element_id { command_kind, u8"output-folder" }, std::move(folder_config)
-            )
-            };
-            folder->set_access_name(u8"저장 폴더 열기");
-            folder->set_cursor(luil::ui_cursor::hand);
-            folder->set_enabled(runtime_state_.dialog.kind == message_dialog_kind::none);
-            folder->set_action(
-                luil::ui_trigger::left_click, [](const luil::ui_action_context&) -> std::vector<luil::input_action> {
-                    return { luil::app_ui_command {
-                        .command = static_cast<std::uint32_t>(runtime_command::open_output_folder)
-                    }
-                    };
-                }
+            label(
+                u8"runtime-status",
+                runtime_state_.status,
+                20,
+                page_ == options_page::preferences  ? 844.0f
+                    : page_ == options_page::output ? 896.0f
+                                                    : 796.0f,
+                content_width,
+                11,
+                true
             );
-            folder->arrange({ { (width / scale - 52) * scale, 764 * scale, 32 * scale, 32 * scale }, scale });
-            content_root->add(std::move(folder));
-            help[u8"output-folder"]
-                = { .title = u8"저장 폴더 열기", .body = u8"실행 파일 옆 data/captures 폴더를 엽니다." };
             help[u8"runtime-status"].title = u8"현재 상태 · 저장 결과";
-            help[u8"preset-name"].title = u8"선택한 영역 프리셋";
-            help[u8"include-cursor"] = { .title = u8"마우스 커서 포함",
-                                         .body = u8"선택한 영역 안의 마우스 커서를 이미지에 함께 저장합니다."
-            };
             luil::scroll_area_config scrolling {};
             scrolling.owner = u8"options-scroll";
-            scrolling.content_height = static_cast<float>(options_window_height - command_window_height);
-            options_scroll_
-                = luil::clamp_scroll(scrolling.content_height, height / scale - command_window_height, options_scroll_);
+            scrolling.content_height = (page_ == options_page::preferences  ? 900.0f
+                                            : page_ == options_page::output ? 960.0f
+                                                                            : 850.0f)
+                - 196.0f;
+            options_scroll_ = luil::clamp_scroll(
+                scrolling.content_height, height / scale - command_window_height - 114.0f, options_scroll_
+            );
             scrolling.scroll_offset = options_scroll_;
             scrolling.scroll = [](const float delta) -> luil::input_action {
                 return luil::make_app_action(options_scroll_intent { delta, false });
@@ -1680,7 +2014,11 @@ namespace chalkag {
             auto area { std::make_unique<luil::scroll_area_element>(std::move(scrolling)) };
             area->set_content(std::move(content_root));
             area->arrange(
-                { { 0, command_window_height * scale, width, std::max(0.0f, height - command_window_height * scale) },
+                { { 0,
+                    (command_window_height + 114.0f) * scale,
+                    width,
+                    std::max(0.0f, height - (command_window_height + 114.0f) * scale)
+                },
                   scale
                 }
             );
@@ -1697,6 +2035,24 @@ namespace chalkag {
         root->add(std::move(image_drop));
 
         auto frame { std::make_shared<luil::ui_frame>() };
+        root->set_enabled(!animation_editor_.confirmation_open());
+        frame->close = [dirty = animation_editor_.has_unsaved_changes(),
+                        active = runtime_state_.busy || runtime_state_.recording,
+                        pending = runtime_state_.pending_recording]() -> luil::input_action {
+            if (active)
+            {
+                return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::request_close) };
+            }
+            if (dirty)
+            {
+                return luil::make_app_action(animation_editor_intent { animation_editor_action::request_exit });
+            }
+            if (pending)
+            {
+                return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::request_close) };
+            }
+            return luil::ui_command::application_exit;
+        };
         frame->tree = std::make_shared<const luil::ui_tree>(std::move(root));
 
         if (animation_editor_.opened() && !runtime_state_.busy && !runtime_state_.recording && !region_state_.selecting)
@@ -1748,6 +2104,48 @@ namespace chalkag {
             frame->popups.push_back(std::move(popup));
         }
 
+        if (preset_menu_open_ && page_ == options_page::region && runtime_state_.options_open)
+        {
+            luil::list_config list {};
+            list.owner = u8"preset-list";
+            list.row_height = 32;
+            const auto selected_key { std::to_string(runtime_state_.preset_index) };
+            list.selected = { selected_key.begin(), selected_key.end() };
+            for (std::size_t index {}; index < runtime_state_.settings.presets.size(); ++index)
+            {
+                const auto key { std::to_string(index) };
+                list.items.push_back(
+                    { std::u8string { key.begin(), key.end() }, runtime_state_.settings.presets[index].name }
+                );
+            }
+            list.select = [](const std::u8string& key) -> luil::input_action {
+                return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::select_preset), key };
+            };
+            list.scroll_offset = preset_scroll_;
+            list.scroll
+                = [](const float delta) { return luil::make_app_action(preset_scroll_intent { delta, false }); };
+            list.scroll_to
+                = [](const float offset) { return luil::make_app_action(preset_scroll_intent { offset, true }); };
+            const float popup_height { std::min(240.0f, static_cast<float>(list.items.size()) * 32) };
+            auto element { std::make_unique<luil::list_element>(std::move(list)) };
+            element->set_access_name(u8"저장한 영역 프리셋");
+            element->arrange({ { 0, 0, (width / scale - 40) * scale, popup_height * scale }, scale });
+            const auto* anchor { frame->tree->find({ luil::ui_element_kind::dropdown, u8"preset-picker" }) };
+            if (anchor)
+            {
+                luil::ui_popup popup {};
+                popup.id = u8"preset-menu";
+                popup.x = anchor->bounds().x / scale;
+                popup.y = (anchor->bounds().y + anchor->bounds().height) / scale;
+                popup.width = width / scale - 40;
+                popup.height = popup_height;
+                popup.tree = std::make_shared<const luil::ui_tree>(std::move(element));
+                popup.dismiss
+                    = [](luil::popup_dismiss_reason) { return luil::make_app_action(preset_menu_intent { false }); };
+                frame->popups.push_back(std::move(popup));
+            }
+        }
+
         if (editor_.opened() && !runtime_state_.busy && !runtime_state_.recording && !region_state_.selecting)
         {
             frame->popups.push_back(editor_.make_popup(scale));
@@ -1770,6 +2168,11 @@ namespace chalkag {
         {
             frame->popups.clear();
             frame->popups.push_back(make_message_dialog(runtime_state_.dialog, scale));
+        }
+        else if (const auto confirmation { animation_editor_.confirmation(scale) })
+        {
+            frame->popups.clear();
+            frame->popups.push_back(*confirmation);
         }
 
         return frame;

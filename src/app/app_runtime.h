@@ -53,6 +53,15 @@ namespace chalkag {
         edit_recording,
         open_animation,
         show_animation_editor,
+        new_recording,
+        cancel_save,
+        select_preset,
+        rename_preset,
+        undo_delete_preset,
+        open_editor_output,
+        show_output_options,
+        show_capture_options,
+        request_close,
     };
 
     struct runtime_state
@@ -71,6 +80,9 @@ namespace chalkag {
         std::uint64_t elapsed_seconds {};
         float glow_position { 24 };
         bool pending_recording {};
+        bool recording_saved {};
+        bool save_cancel_requested {};
+        bool can_undo_delete {};
         capture_region recorded_region {};
         double recorded_duration {};
         float quality_position { 80 };
@@ -79,7 +91,7 @@ namespace chalkag {
         message_dialog_state dialog {};
     };
 
-    inline constexpr int options_window_width { 400 };
+    inline constexpr int options_window_width { 480 };
     inline constexpr int options_window_height { 810 };
 
     class app_runtime final

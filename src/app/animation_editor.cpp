@@ -7,6 +7,7 @@
 #include "include/core/SkFont.h"
 #include "include/core/SkSamplingOptions.h"
 #include "include/core/SkTypeface.h"
+#include "luil/ui/badge_element.h"
 #include "luil/ui/check_element.h"
 #include "luil/ui/choice_group_element.h"
 #include "luil/ui/dialog_elements.h"
@@ -16,6 +17,7 @@
 #include "luil/ui/root_element.h"
 #include "luil/ui/scroll_area_element.h"
 #include "luil/ui/slider_element.h"
+#include "luil/ui/spinner_element.h"
 
 #include <algorithm>
 #include <cmath>
@@ -606,6 +608,135 @@ namespace chalkag {
         return !work_.valid();
     }
 
+    bool animation_editor::has_pending_inputs() const
+    {
+        if (!document_ || edit_.frames.empty())
+        {
+            return false;
+        }
+
+        const std::array values { edit_.frames[current_].milliseconds,
+                                  edit_.crop.x,
+                                  edit_.crop.y,
+                                  edit_.crop.width,
+                                  edit_.crop.height,
+                                  edit_.output_width,
+                                  edit_.output_height
+        };
+        for (std::size_t index {}; index < values.size(); ++index)
+        {
+            if (field_value(index) != values[index])
+            {
+                return true;
+            }
+        }
+
+        return composition_.has_value();
+    }
+
+    bool animation_editor::has_unsaved_changes() const
+    {
+        return document_ && (edit_ != saved_edit_ || has_pending_inputs());
+    }
+
+    bool animation_editor::confirmation_open() const noexcept
+    {
+        return confirming_;
+    }
+
+    std::optional<luil::ui_popup> animation_editor::confirmation(const float scale) const
+    {
+        if (!confirming_)
+        {
+            return std::nullopt;
+        }
+
+        auto root { std::make_unique<luil::root_element>(u8"editor-confirm-content") };
+        auto background { std::make_unique<luil::panel_element>(
+            luil::ui_element_id { editor_kind, u8"editor-confirm-background" }, luil::panel_config {}
+        )
+        };
+        background->arrange({ { 0, 0, 440 * scale, 188 * scale }, scale });
+        root->add(std::move(background));
+        auto title { std::make_unique<luil::label_element>(
+            luil::ui_element_id { editor_kind, u8"editor-confirm-title" },
+            luil::label_config {
+                .text = u8"저장하지 않은 편집이 있습니다", .font_size = 16, .color = luil::label_color_role::primary
+            }
+        )
+        };
+        title->arrange({ { 20 * scale, 16 * scale, 400 * scale, 28 * scale }, scale });
+        root->add(std::move(title));
+        auto description { std::make_unique<luil::label_element>(
+            luil::ui_element_id { editor_kind, u8"editor-confirm-description" },
+            luil::label_config {
+                .text = confirm_exit_
+                    ? u8"편집본을 저장하거나 변경을 버리고 종료할 수 있습니다. 적용 전 입력은 먼저 편집창에서 "
+                      u8"적용하세요."
+                    : u8"다른 원본을 열기 전에 현재 편집을 저장하세요. 변경을 버리면 실행 취소 기록도 사라집니다.",
+                .wrap = true,
+                .max_lines = 3
+            }
+        )
+        };
+        description->arrange({ { 20 * scale, 52 * scale, 400 * scale, 60 * scale }, scale });
+        root->add(std::move(description));
+        const auto add = [&](const char8_t* id,
+                             const char8_t* text,
+                             const float x,
+                             luil::ui_action action,
+                             const luil::text_button_visual visual) {
+            auto button { std::make_unique<luil::text_button_element>(
+                luil::ui_element_id { editor_kind, id }, luil::text_button_config { .text = text, .visual = visual }
+            )
+            };
+            button->set_action(luil::ui_trigger::left_click, std::move(action));
+            button->set_enabled(!work_.valid());
+            button->arrange({ { x * scale, 132 * scale, 126 * scale, 34 * scale }, scale });
+            root->add(std::move(button));
+        };
+        add(u8"editor-keep",
+            u8"계속 편집",
+            20,
+            button_action(animation_editor_action::keep_editing),
+            luil::text_button_visual::normal);
+        add(
+            u8"editor-discard",
+            confirm_exit_ ? u8"버리고 종료" : u8"변경 버리기",
+            156,
+            [exit = confirm_exit_](const luil::ui_action_context&) -> std::vector<luil::input_action> {
+                std::vector<luil::input_action> actions {
+                    make_editor_action(animation_editor_action::discard_changes)
+                };
+                if (exit)
+                {
+                    actions.push_back(luil::ui_command::application_exit);
+                }
+                return actions;
+            },
+            luil::text_button_visual::danger
+        );
+        add(u8"editor-save",
+            u8"편집본 저장",
+            292,
+            button_action(animation_editor_action::export_file),
+            luil::text_button_visual::accent);
+        root->set_focus_trap(true);
+        root->set_focus_entry({ editor_kind, u8"editor-keep" });
+        root->arrange({ { 0, 0, 440 * scale, 188 * scale }, scale });
+        luil::ui_popup popup {};
+        popup.id = u8"editor-confirm";
+        popup.anchor = u8"animation-editor";
+        popup.x = 24;
+        popup.y = 110;
+        popup.width = 440;
+        popup.height = 188;
+        popup.tree = std::make_shared<const luil::ui_tree>(std::move(root));
+        popup.dismiss
+            = [](luil::popup_dismiss_reason) { return make_editor_action(animation_editor_action::keep_editing); };
+        return popup;
+    }
+
     std::optional<int> animation_editor::field_value(const std::size_t index) const
     {
         const auto& text { fields_[index].text };
@@ -832,6 +963,14 @@ namespace chalkag {
         {
             opened_ = true;
 
+            if ((!open->path.empty() || !open->recording.frames.empty()) && has_unsaved_changes())
+            {
+                pending_open_ = *open;
+                confirm_exit_ = false;
+                confirming_ = true;
+                return true;
+            }
+
             if (work_.valid())
             {
                 return true;
@@ -974,6 +1113,47 @@ namespace chalkag {
             return true;
         }
 
+        if (command == animation_editor_action::request_exit)
+        {
+            opened_ = true;
+            playing_ = false;
+            confirming_ = true;
+            confirm_exit_ = true;
+            return true;
+        }
+        if (command == animation_editor_action::keep_editing)
+        {
+            confirming_ = false;
+            pending_open_.reset();
+            confirm_exit_ = false;
+            return true;
+        }
+        if (command == animation_editor_action::discard_changes)
+        {
+            confirming_ = false;
+            edit_ = saved_edit_;
+            refresh_timeline();
+            current_ = std::min(current_, edit_.frames.size() - 1);
+            selected_.assign(edit_.frames.size(), false);
+            selected_[current_] = true;
+            selected_count_ = 1;
+            undo_.clear();
+            redo_.clear();
+            refresh_fields();
+            if (pending_open_)
+            {
+                const auto open { std::move(*pending_open_) };
+                pending_open_.reset();
+                return handle(luil::app_message { open });
+            }
+            return true;
+        }
+        if (command == animation_editor_action::reset_inputs)
+        {
+            refresh_fields();
+            return true;
+        }
+
         if (command == animation_editor_action::close)
         {
             opened_ = false;
@@ -999,6 +1179,14 @@ namespace chalkag {
 
         const auto index { static_cast<std::size_t>(std::clamp(intent->value, 0.0, 1000000.0)) };
         animation_edit draft {};
+
+        if (has_pending_inputs()
+            && (command == animation_editor_action::select || command == animation_editor_action::previous
+                || command == animation_editor_action::next))
+        {
+            status_ = u8"입력값을 적용하거나 입력 되돌리기를 누른 뒤 프레임을 이동하세요.";
+            return true;
+        }
 
         switch (command)
         {
@@ -1244,7 +1432,25 @@ namespace chalkag {
             );
             break;
 
+        case animation_editor_action::webp_mode:
+            options_.webp_lossless = index == 0;
+            break;
+        case animation_editor_action::webp_quality:
+            options_.webp_quality = std::clamp(static_cast<int>(index), 1, 100);
+            break;
+        case animation_editor_action::compression:
+            options_.compression = index == 0 ? lossless_compression::fast
+                : index == 2                  ? lossless_compression::maximum
+                                              : lossless_compression::compact;
+            break;
         case animation_editor_action::export_file: {
+            if (has_pending_inputs())
+            {
+                confirming_ = false;
+                status_ = u8"적용 전 입력이 있습니다. 각 도구의 적용 또는 입력 되돌리기를 누르세요.";
+                break;
+            }
+            confirming_ = false;
             cancelled_ = false;
             playing_ = false;
             status_ = u8"편집한 애니메이션을 저장하는 중…";
@@ -1322,7 +1528,7 @@ namespace chalkag {
         {
             auto result { work_.get() };
 
-            if (cancelled_.load())
+            if (cancelled_.load() && result.output.empty())
             {
                 result.document.reset();
                 result.message = u8"작업을 취소했습니다. 원본과 편집 내용은 유지됩니다.";
@@ -1330,11 +1536,25 @@ namespace chalkag {
 
             cancelled_ = false;
 
+            if (!result.output.empty())
+            {
+                saved_edit_ = edit_;
+                last_output_ = result.output;
+                if (pending_open_)
+                {
+                    const auto open { std::move(*pending_open_) };
+                    pending_open_.reset();
+                    static_cast<void>(handle(luil::app_message { open }));
+                }
+            }
+
             if (result.document)
             {
                 document_ = std::move(result.document);
                 title_ = pending_title_;
                 edit_ = initial_animation_edit(*document_);
+                saved_edit_ = edit_;
+                last_output_.clear();
                 refresh_timeline();
                 undo_.clear();
                 redo_.clear();
@@ -1604,15 +1824,16 @@ namespace chalkag {
         };
         luil::ui_window window {};
         window.id = u8"animation-editor";
-        window.caption.title = u8"애니메이션 편집 · chalkag";
+        window.caption.title
+            = has_unsaved_changes() ? u8"애니메이션 편집 · 변경됨 · chalkag" : u8"애니메이션 편집 · chalkag";
         window.caption.buttons = { .minimize = true, .maximize = true, .close = true };
         window.caption.close_tooltip = u8"편집창 닫기";
         window.x = 24;
         window.y = 96;
         window.width = 1040;
-        window.height = 760;
-        window.minimum_width = 960;
-        window.minimum_height = 730;
+        window.height = 660;
+        window.minimum_width = 840;
+        window.minimum_height = 520;
         window.close = [] { return make_editor_action(animation_editor_action::close); };
         window.metrics = [](const float w, const float h, const float s) {
             return luil::app_message { animation_editor_metrics { w, h, s } };
@@ -1631,6 +1852,17 @@ namespace chalkag {
         caption->arrange({ { 0, 0, width * scale, luil::caption_element::height_for(window.caption) * scale }, scale });
         root->add(std::move(caption));
         label(u8"edit-source", title_, 20, 42, main_width - 210, 16);
+        auto state_badge { std::make_unique<luil::badge_element>(
+            luil::ui_element_id { editor_kind, u8"edit-dirty" },
+            luil::badge_config { .text = has_pending_inputs() ? u8"입력 적용 필요"
+                                     : has_unsaved_changes()  ? u8"저장 전 변경"
+                                                              : u8"변경 없음",
+                                 .tone = has_unsaved_changes() ? luil::badge_tone::warning : luil::badge_tone::neutral
+            }
+        )
+        };
+        state_badge->arrange({ { (main_width - 142) * scale, 44 * scale, 160 * scale, 24 * scale }, scale });
+        root->add(std::move(state_badge));
         button(
             u8"edit-open",
             u8"이미지 열기",
@@ -1648,7 +1880,7 @@ namespace chalkag {
             u8"편집본 저장",
             { width - 144, 40, 128, 32 },
             button_action(animation_editor_action::export_file),
-            available,
+            available && !has_pending_inputs(),
             luil::text_button_visual::accent
         );
         button(
@@ -2043,6 +2275,51 @@ namespace chalkag {
             sidebar
         );
         y += 34;
+        label(u8"edit-export-settings", u8"WebP 품질 · 압축 속도", right, y, sidebar, 14);
+        y += 30;
+        choice(
+            u8"edit-webp-mode",
+            u8"WebP 압축 방식",
+            { { u8"0", u8"무손실" }, { u8"1", u8"손실" } },
+            options_.webp_lossless ? u8"0" : u8"1",
+            animation_editor_action::webp_mode,
+            right,
+            y,
+            sidebar
+        );
+        y += 36;
+        luil::slider_config quality {};
+        quality.minimum = 1;
+        quality.maximum = 100;
+        quality.value = static_cast<float>(options_.webp_quality);
+        quality.magnets = { 50, 75, 80, 90, 100 };
+        quality.change_to
+            = [](const float value) { return make_editor_action(animation_editor_action::webp_quality, value); };
+        quality.change = [current = options_.webp_quality](const float delta) {
+            return make_editor_action(animation_editor_action::webp_quality, current + delta);
+        };
+        auto quality_slider {
+            std::make_unique<luil::slider_element>(luil::ui_element_id { editor_kind, u8"edit-webp-quality" }, quality)
+        };
+        quality_slider->set_tooltip(u8"WebP 품질 · " + number_text(options_.webp_quality));
+        quality_slider->set_enabled(
+            available && !options_.webp_lossless && options_.animation_format == image_format::webp
+        );
+        quality_slider->arrange({ { right * scale, y * scale, sidebar * scale, 24 * scale }, scale });
+        add(std::move(quality_slider));
+        y += 34;
+        const auto speed { std::to_string(static_cast<int>(options_.compression)) };
+        choice(
+            u8"edit-compression",
+            u8"저장 압축 속도",
+            { { u8"0", u8"빠르게" }, { u8"1", u8"균형" }, { u8"2", u8"최대 압축" } },
+            std::u8string { speed.begin(), speed.end() },
+            animation_editor_action::compression,
+            right,
+            y,
+            sidebar
+        );
+        y += 36;
         label(
             u8"edit-export-note",
             options_.animation_format == image_format::gif ? u8"GIF · 투명 영역은 흰색 배경으로 합성"
@@ -2082,8 +2359,40 @@ namespace chalkag {
         root->add(std::move(area));
         label(u8"edit-status", status_, 20, height - 28, width - 120, 11);
 
+        if (has_pending_inputs())
+        {
+            button(
+                u8"edit-reset-inputs",
+                u8"입력 되돌리기",
+                { width - 144, 78, 128, 28 },
+                button_action(animation_editor_action::reset_inputs),
+                available
+            );
+        }
+        if (!last_output_.empty() && !work_.valid())
+        {
+            button(
+                u8"edit-open-result",
+                u8"저장 파일 열기",
+                { width - 270, 78, 116, 28 },
+                [path = last_output_.u8string()](const luil::ui_action_context&) -> std::vector<luil::input_action> {
+                    return { luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::open_editor_output),
+                                                    path
+                    }
+                    };
+                }
+            );
+        }
+
         if (work_.valid())
         {
+            auto spinner { std::make_unique<luil::spinner_element>(
+                luil::ui_element_id { editor_kind, u8"edit-work" }, luil::spinner_config { .name = u8"이미지 처리 중" }
+            )
+            };
+            spinner->set_access_name(u8"이미지 처리 중");
+            spinner->arrange({ { (width - 116) * scale, (height - 28) * scale, 22 * scale, 22 * scale }, scale });
+            root->add(std::move(spinner));
             button(
                 u8"edit-cancel",
                 u8"취소",
@@ -2097,6 +2406,8 @@ namespace chalkag {
         const float caption_height { luil::caption_element::height_for(window.caption) * scale };
         image_drop->arrange({ { 0, caption_height, width * scale, height * scale - caption_height }, scale });
         root->add(std::move(image_drop));
+
+        root->set_enabled(!confirming_);
 
         root->arrange({ { 0, 0, width * scale, height * scale }, scale });
         window.tree = std::make_shared<const luil::ui_tree>(std::move(root));

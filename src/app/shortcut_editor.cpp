@@ -1,5 +1,6 @@
 #include "app/shortcut_editor.h"
 #include "app/animation_editor.h"
+#include "app/command_window.h"
 
 #include "luil/ui/dialog_elements.h"
 #include "luil/ui/label_element.h"
@@ -167,6 +168,11 @@ namespace chalkag {
 
     std::optional<luil::text_input_target> command_policy::text_target_of(const luil::ui_element_kind kind) const
     {
+        if (kind == luil::application_element_kind(12))
+        {
+            return static_cast<luil::text_input_target>(205);
+        }
+
         for (std::uint32_t index {}; index < input_kinds.size(); ++index)
         {
             if (kind == luil::application_element_kind(input_kinds[index]))
@@ -185,6 +191,11 @@ namespace chalkag {
 
     luil::input_action command_policy::make_text_edit_action(const luil::text_edit_request& request) const
     {
+        if (static_cast<std::uint32_t>(request.target) == 205)
+        {
+            return luil::make_app_action(preset_name_edit_intent { request });
+        }
+
         if (static_cast<std::uint32_t>(request.target) >= 301 && static_cast<std::uint32_t>(request.target) <= 308)
         {
             return animation_editor_policy {}.make_text_edit_action(request);
@@ -200,6 +211,11 @@ namespace chalkag {
 
     luil::input_action command_policy::make_text_composition_action(const luil::text_composition_event& event) const
     {
+        if (static_cast<std::uint32_t>(event.target) == 205)
+        {
+            return luil::make_app_action(preset_name_composition_intent { event });
+        }
+
         if (static_cast<std::uint32_t>(event.target) >= 301 && static_cast<std::uint32_t>(event.target) <= 308)
         {
             return animation_editor_policy {}.make_text_composition_action(event);

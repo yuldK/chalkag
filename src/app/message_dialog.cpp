@@ -60,7 +60,14 @@ namespace chalkag {
             auto button { std::make_unique<luil::text_button_element>(luil::ui_element_id { kind, owner }, config) };
             button->set_action(
                 luil::ui_trigger::left_click,
-                [command, action](const luil::ui_action_context&) -> std::vector<luil::input_action> {
+                [command, action, exit = state.kind == message_dialog_kind::exit_application](
+                    const luil::ui_action_context&
+                ) -> std::vector<luil::input_action> {
+                    if (exit && action == runtime_command::confirm_dialog)
+                    {
+                        return { luil::ui_command::application_exit };
+                    }
+
                     return { command(action) };
                 }
             );
@@ -76,9 +83,10 @@ namespace chalkag {
 
         add_button(
             u8"message-confirm",
-            !confirmation                                             ? u8"확인"
-                : state.kind == message_dialog_kind::exit_application ? u8"종료"
-                                                                      : u8"비우기",
+            !confirmation                                              ? u8"확인"
+                : state.kind == message_dialog_kind::exit_application  ? u8"종료"
+                : state.kind == message_dialog_kind::replace_recording ? u8"새 녹화"
+                                                                       : u8"비우기",
             runtime_command::confirm_dialog,
             confirmation ? luil::text_button_visual::danger : luil::text_button_visual::accent,
             !confirmation

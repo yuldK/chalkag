@@ -14,8 +14,8 @@
 
 namespace chalkag {
     class single_instance;
-    inline constexpr int command_window_width { 300 };
-    inline constexpr int command_window_height { 82 };
+    inline constexpr int command_window_width { 480 };
+    inline constexpr int command_window_height { 176 };
 
     enum class options_page
     {
@@ -40,6 +40,30 @@ namespace chalkag {
         float value {};
         bool absolute {};
     };
+
+    struct preset_menu_intent
+    {
+        bool open {};
+    };
+
+    struct preset_scroll_intent
+    {
+        float value {};
+        bool absolute {};
+    };
+
+    struct preset_name_edit_intent
+    {
+        luil::text_edit_request request {};
+    };
+
+    struct preset_name_composition_intent
+    {
+        luil::text_composition_event event {};
+    };
+
+    struct revert_shortcuts_intent
+    {};
 
     [[nodiscard]] luil::caption_config make_command_caption();
     [[nodiscard]] bool hit_command_caption_button(const luil::ui_frame& frame, float x, float y);
@@ -93,6 +117,11 @@ namespace chalkag {
         options_page page_ {};
         bool shortcuts_edited_ {};
         bool fps_menu_open_ {};
+        bool preset_menu_open_ {};
+        float preset_scroll_ {};
+        luil::text::text_edit_state preset_name_ {};
+        std::u8string preset_name_source_ {};
+        std::optional<luil::text_composition_event> preset_composition_ {};
         float options_scroll_ {};
         std::atomic<bool> closed_ { false };
     };

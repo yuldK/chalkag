@@ -167,6 +167,58 @@ namespace chalkag {
             require(preview_color(editor) == SK_ColorBLACK, "closed session's pending result cannot restore its cache");
         }
 
+        void test_edit_safety(const std::filesystem::path& directory, const recording_snapshot& snapshot)
+        {
+            animation_editor editor {};
+            const open_animation_editor_intent source { snapshot, {}, directory, {} };
+            require(editor.handle(luil::app_message { source }), "open safety source");
+            const auto deadline { std::chrono::steady_clock::now() + std::chrono::seconds { 5 } };
+            while (value(editor, u8"edit-summary").empty())
+            {
+                require(std::chrono::steady_clock::now() < deadline, "safety source loads");
+                editor.tick(std::chrono::steady_clock::now());
+                std::this_thread::sleep_for(std::chrono::milliseconds { 2 });
+            }
+            require(!editor.has_unsaved_changes(), "new source starts clean");
+            const luil::text_edit_request request { .target = static_cast<luil::text_input_target>(301),
+                                                    .command = luil::text::text_edit_command::replace_all,
+                                                    .text = u8"123"
+            };
+            require(
+                editor.handle(luil::app_message { animation_editor_edit_intent { request } }), "edit duration input"
+            );
+            require(editor.has_pending_inputs() && editor.has_unsaved_changes(), "unapplied input needs protection");
+            const auto position { value(editor, u8"edit-position") };
+            send(editor, animation_editor_action::next);
+            require(value(editor, u8"edit-position") == position, "frame navigation preserves unapplied input");
+            send(editor, animation_editor_action::export_file);
+            require(
+                value(editor, u8"edit-status").starts_with(u8"적용 전 입력"), "export never ignores unapplied input"
+            );
+            send(editor, animation_editor_action::apply_delay);
+            require(!editor.has_pending_inputs() && editor.has_unsaved_changes(), "applied edit remains unsaved");
+            const auto edited { value(editor, u8"edit-summary") };
+            require(editor.handle(luil::app_message { source }), "request source replacement");
+            require(editor.confirmation(1).has_value(), "source replacement requires confirmation");
+            require(value(editor, u8"edit-summary") == edited, "replacement preserves current edit while pending");
+            send(editor, animation_editor_action::keep_editing);
+            require(!editor.confirmation(1), "cancel replacement removes confirmation");
+            send(editor, animation_editor_action::request_exit);
+            require(editor.confirmation(1).has_value(), "application exit protects external edits");
+            send(editor, animation_editor_action::keep_editing);
+            send(editor, animation_editor_action::export_file);
+            const auto saved { std::chrono::steady_clock::now() + std::chrono::seconds { 5 } };
+            while (editor.has_unsaved_changes())
+            {
+                require(std::chrono::steady_clock::now() < saved, "edited export completes");
+                editor.tick(std::chrono::steady_clock::now());
+                std::this_thread::sleep_for(std::chrono::milliseconds { 2 });
+            }
+            require(value(editor, u8"edit-status").starts_with(u8"저장 완료"), "successful export clears dirty state");
+            send(editor, animation_editor_action::undo);
+            require(editor.has_unsaved_changes(), "undo after export is a new unsaved change");
+        }
+
     } // namespace
 } // namespace chalkag
 
@@ -281,6 +333,7 @@ int main(const int argc, char** argv)
             "save option refresh preserves edits"
         );
         chalkag::test_playback(directory, 60);
+        chalkag::test_edit_safety(directory, snapshot);
         chalkag::test_playback(directory, 120);
 
         std::cout << "Animation editor checks passed\n";

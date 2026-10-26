@@ -5,6 +5,7 @@
 #include "capture/save_progress.h"
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -43,10 +44,13 @@ namespace chalkag {
         std::filesystem::path output;
     };
 
+    // 주입한 공급자는 출력 배율을 반영한 BGRA 비트맵을 채운다. 비어 있으면 실제 화면을 수집한다.
+    using capture_frame_source = std::function<bool(capture_region, capture_options, SkBitmap&)>;
+
     class image_capture
     {
     public:
-        explicit image_capture(std::filesystem::path executable_directory);
+        explicit image_capture(std::filesystem::path executable_directory, capture_frame_source frame_source = {});
         ~image_capture();
         image_capture(const image_capture&) = delete;
         image_capture& operator=(const image_capture&) = delete;
@@ -65,6 +69,9 @@ namespace chalkag {
         [[nodiscard]] bool recording() const;
         [[nodiscard]] bool recording_failed() const noexcept;
         void request_cancel() noexcept;
+        void request_save_cancel() noexcept;
+        // 저장 작업이 반환된 뒤 호출하며, 앱 종료 취소 상태는 해제하지 않는다.
+        void reset_save_cancel() noexcept;
         void cancel_recording();
 
     private:

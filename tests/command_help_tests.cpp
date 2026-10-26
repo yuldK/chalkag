@@ -302,19 +302,6 @@ namespace chalkag {
                 "GIF remains visible without optional FFmpeg"
             );
 
-            const auto* const compression {
-                frame->tree->find({ luil::ui_element_kind::choice, u8"compression/small" })
-            };
-            check(
-                compression != nullptr && compression->accessibility().selected.value_or(false)
-                    && compression->accessibility().name == u8"균형",
-                "balanced lossless is the default UI choice"
-            );
-            check(
-                frame->tree->find({ luil::ui_element_kind::choice, u8"compression/maximum" }) != nullptr,
-                "maximum compression remains an explicit choice"
-            );
-
             const auto* const popup { help_popup(*frame) };
             check(popup != nullptr, "FPS dropdown anchors custom help");
 
@@ -332,6 +319,21 @@ namespace chalkag {
                     "option without shortcut omits empty shortcut element"
                 );
             }
+
+            driver.handle(luil::app_message { options_tab_intent { options_page::output } });
+            const auto output_frame { frame_for(driver) };
+            const auto* const compression {
+                output_frame->tree->find({ luil::ui_element_kind::choice, u8"compression/small" })
+            };
+            check(
+                compression != nullptr && compression->accessibility().selected.value_or(false)
+                    && compression->accessibility().name == u8"균형",
+                "balanced lossless is the default UI choice"
+            );
+            check(
+                output_frame->tree->find({ luil::ui_element_kind::choice, u8"compression/maximum" }) != nullptr,
+                "maximum compression remains an explicit choice"
+            );
 
             send_target(driver, target(u8"compression/small", luil::ui_element_kind::choice));
 
@@ -746,8 +748,8 @@ namespace chalkag {
                     const auto* save { frame->tree->find({ command_kind, u8"toggle-recording" }) };
                     const auto* options { frame->tree->find({ command_kind, u8"open-options" }) };
                     check(
-                        clear && clear->enabled() && clear->accessibility().name == u8"비우기",
-                        "retained recording exposes clear even without a selected region"
+                        clear && clear->enabled() && clear->accessibility().name == u8"새 녹화",
+                        "retained recording exposes a new recording action"
                     );
                     if (clear && save && options)
                     {
@@ -759,16 +761,16 @@ namespace chalkag {
                         const auto actions { (*clear->action(luil::ui_trigger::left_click))({}) };
                         const auto* action { std::get_if<luil::app_ui_command>(&actions.front()) };
                         check(
-                            action && action->command == static_cast<std::uint32_t>(runtime_command::discard_recording),
-                            "toolbar clear uses the existing confirmation command"
+                            action && action->command == static_cast<std::uint32_t>(runtime_command::new_recording),
+                            "new recording uses the safe replacement command"
                         );
                     }
                     send_target(driver, target(u8"toolbar-discard-recording"));
                     frame = frame_for(driver);
                     const auto* popup { help_popup(*frame) };
                     check(
-                        popup && help_name(*popup, u8"help-shortcut") == u8"Ctrl+Shift+R",
-                        "clear help shows the configured default shortcut"
+                        popup && popup->tree->find({ command_kind, u8"help-shortcut" }) == nullptr,
+                        "new recording never advertises the discard shortcut"
                     );
 
                     state.dialog = { message_dialog_kind::discard_recording, 1, u8"녹화 비우기", u8"확인" };
@@ -1299,6 +1301,7 @@ namespace chalkag {
             progress,
             recording,
             saved_file,
+            editor,
         };
 
         class progress_preview_delegate final : public luil::win32::window_delegate
@@ -1312,11 +1315,30 @@ namespace chalkag {
             {
                 runtime_state state {};
 
+                if (kind_ == preview_kind::editor)
+                {
+                    wchar_t path[32768] {};
+                    const auto size { GetEnvironmentVariableW(L"CHALKAG_TEST_EDITOR_PREVIEW", path, 32768) };
+                    if (size > 0 && size < 32768)
+                    {
+                        const std::filesystem::path file { path };
+                        const auto output { file.parent_path() / L"exports" };
+                        std::filesystem::create_directories(output);
+                        state.settings.appearance.theme = luil::theme_preference::dark;
+                        host.post_app_message(luil::app_message { state });
+                        host.post_app_message(
+                            luil::app_message { open_animation_editor_intent { {}, file, output, {} } }
+                        );
+                    }
+                    return;
+                }
+
                 if (kind_ == preview_kind::saved_file)
                 {
                     state.options_open = true;
                     state.pending_recording = true;
                     state.recorded_region = { 0, 0, 852, 735 };
+                    state.recording_saved = true;
                     state.recorded_duration = 4;
                     state.saved_summary = u8"마지막 저장 · 1.36 MiB";
                     state.saved_output = L"E:/캡쳐 저장 폴더/capture-20261008-210000.webp";
@@ -1334,6 +1356,13 @@ namespace chalkag {
                 {
                     state.busy = true;
                     state.progress = { save_stage::encoding, 37, 100 };
+                }
+
+                if (kind_ == preview_kind::saved_file)
+                {
+                    host.post_app_message(
+                        luil::app_message { region_state_intent { .region = state.recorded_region } }
+                    );
                 }
 
                 host.post_app_message(luil::app_message { state });
@@ -1391,8 +1420,8 @@ namespace chalkag {
             const auto page { frame_for(preferences) };
             const auto* input { page->tree->find({ luil::application_element_kind(6), u8"shortcut-select" }) };
             check(
-                input != nullptr && approximately_equal(input->bounds().y, 446),
-                "shortcut input preserves layout in scroll content"
+                input != nullptr && approximately_equal(input->bounds().y, 620),
+                "shortcut input follows theme preview cards in scroll content"
             );
             check(
                 page->tree->find({ command_kind, u8"apply-shortcuts" }) != nullptr,
@@ -1411,7 +1440,7 @@ namespace chalkag {
                 "fourth shortcut field fits above actions and help stays above the status footer"
             );
 
-            const auto* colors { page->tree->find({ luil::application_element_kind(9), u8"accent-picker" }) };
+            const auto* colors { page->tree->find({ luil::ui_element_kind::choice_group, u8"accent-picker" }) };
             check(
                 colors != nullptr && colors->accessibility().role == luil::access_role::radio_group,
                 "color picker exposes a selection group"
@@ -1479,6 +1508,11 @@ int main(const int count, const char* arguments[])
             || GetEnvironmentVariableW(L"CHALKAG_TEST_SAVED_FILE_PREVIEW", nullptr, 0) > 0)
         {
             return chalkag::run_progress_preview(chalkag::preview_kind::saved_file);
+        }
+
+        if (GetEnvironmentVariableW(L"CHALKAG_TEST_EDITOR_PREVIEW", nullptr, 0) > 0)
+        {
+            return chalkag::run_progress_preview(chalkag::preview_kind::editor);
         }
 
         const int result { chalkag::run_tests() };
