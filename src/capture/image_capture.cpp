@@ -693,6 +693,23 @@ namespace chalkag {
                 {
                     frames = recorder.finish(elapsed);
 
+                    // 타일 압축은 뒤따라 진행되므로 저장 실패가 정지한 뒤에야 드러날 수 있다.
+                    // 이때 녹화기는 실패한 프레임 앞에서 끝내므로 보관 길이를 실제 프레임에서 다시 계산한다.
+                    if (recorder.storage_failed())
+                    {
+                        if (error.empty())
+                        {
+                            error = u8"변경된 녹화 프레임을 보관할 수 없습니다. 디스크 공간을 확인하세요.";
+                        }
+
+                        elapsed = 0;
+
+                        for (const auto& frame : frames)
+                        {
+                            elapsed += frame.duration_seconds;
+                        }
+                    }
+
                     if (frames.empty() && error.empty())
                     {
                         error = u8"녹화 원본을 마무리할 수 없습니다.";

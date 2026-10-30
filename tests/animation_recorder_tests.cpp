@@ -425,9 +425,60 @@ namespace chalkag {
             animation_recorder unsupported { directory, image_format::gif };
             check(!unsupported.append(image, 0.0), "native recorder rejects GIF format");
             animation_recorder failed { directory / "missing", image_format::webp };
-            check(!failed.append(image, 0.0) && failed.finish(1.0).empty(), "image encoding failure rejects recording");
+            static_cast<void>(failed.append(image, 0.0));
+            check(failed.finish(1.0).empty() && failed.storage_failed(), "image encoding failure rejects recording");
             animation_recorder empty { directory, image_format::webp };
             check(empty.finish(1.0).empty(), "empty recorder has no animation");
+        }
+
+        // 대기열보다 많은 프레임을 연달아 넣어도 순서·위치·픽셀이 수집한 그대로여야 한다.
+        void run_pipeline(const std::filesystem::path& directory, const image_format format)
+        {
+            std::filesystem::create_directories(directory);
+            constexpr int width { 96 };
+            constexpr int height { 64 };
+            animation_recorder recorder { directory, format };
+            auto current { background(width, height) };
+            std::vector<pixel_buffer> samples {};
+
+            for (int index {}; index < 40; ++index)
+            {
+                patch(
+                    current,
+                    width,
+                    (index * 7) % (width - 8),
+                    (index * 5) % (height - 8),
+                    8,
+                    0xff000000U | static_cast<std::uint32_t>(index * 0x051a2b)
+                );
+                samples.push_back(current);
+                check(
+                    recorder.append(pixmap(samples.back(), width, height), static_cast<double>(index) / 30),
+                    "pipelined recorder accepts every captured sample"
+                );
+            }
+
+            const auto frames { recorder.finish(40.0 / 30) };
+            check(
+                frames.size() == samples.size() && !recorder.storage_failed(), "pipelined recorder keeps every frame"
+            );
+            check(duration_ms(frames) == 1333, "pipelined recorder keeps capture timestamps");
+
+            expected_frames expected {};
+
+            for (std::size_t index {}; index < frames.size(); ++index)
+            {
+                check(
+                    frames[index].path.filename().string()
+                        == "frame-" + std::to_string(index) + (format == image_format::apng ? ".png" : ".webp"),
+                    "pipelined frames stay in capture order"
+                );
+                expected.emplace(frames[index].path, samples[index]);
+            }
+
+            const auto output { directory / (format == image_format::apng ? "result.png" : "result.webp") };
+            check(write_animation(output, format, width, height, frames), "pipelined animation writes");
+            verify_animation(output, width, height, frames, expected);
         }
 
         void run_storage_failure(const std::filesystem::path& directory, const image_format format)
@@ -449,11 +500,12 @@ namespace chalkag {
                 recorder.append(pixmap(samples[0], 8, 4), 0.0) && recorder.append(pixmap(samples[1], 8, 4), 0.1),
                 "frames before storage failure append"
             );
-            check(!recorder.append(pixmap(samples[2], 8, 4), 0.2), "blocked tile reports storage failure");
-            check(recorder.storage_failed(), "storage failure is distinguishable from invalid input");
-            check(!recorder.append(pixmap(samples[3], 8, 4), 0.3), "storage failure blocks later frames");
+            // 압축은 작업 스레드에서 진행되므로 실패는 이후 추가나 마무리에서 드러난다.
+            static_cast<void>(recorder.append(pixmap(samples[2], 8, 4), 0.2));
+            static_cast<void>(recorder.append(pixmap(samples[3], 8, 4), 0.3));
 
             const auto frames { recorder.finish(5.0) };
+            check(recorder.storage_failed(), "storage failure is distinguishable from invalid input");
             check(frames.size() == 2, "storage failure keeps frames written before the failure");
             check(duration_ms(frames) == 200, "storage failure ends at the failed frame timestamp");
 
@@ -526,6 +578,8 @@ namespace chalkag {
                 expected.emplace(path, samples[index]);
             }
 
+            double append_total_ms {};
+            double append_max_ms {};
             const auto begin { std::chrono::steady_clock::now() };
 
             if (optimized)
@@ -534,10 +588,16 @@ namespace chalkag {
 
                 for (std::size_t index {}; index < samples.size(); ++index)
                 {
+                    // 수집 스레드가 막히는 시간만 따로 재어 녹화 간격에 주는 영향을 본다.
+                    const auto append_begin { std::chrono::steady_clock::now() };
                     check(
                         recorder.append(pixmap(samples[index], width, height), static_cast<double>(index) / 16),
                         "optimized benchmark appends sample"
                     );
+
+                    const double append_ms { milliseconds_since(append_begin) };
+                    append_total_ms += append_ms;
+                    append_max_ms = std::max(append_max_ms, append_ms);
                 }
 
                 frames = recorder.finish(1.0);
@@ -578,7 +638,8 @@ namespace chalkag {
             std::cout << (format == image_format::apng ? "APNG" : "WebP") << ',' << width << 'x' << height << ','
                       << workload << ',' << (optimized ? "optimized" : "full") << ',' << frames.size() << ','
                       << encoding_ms << ',' << mux_ms << ',' << total_ms << ',' << temporary_bytes << ','
-                      << std::filesystem::file_size(output) << '\n';
+                      << std::filesystem::file_size(output) << ',' << append_total_ms / samples.size() << ','
+                      << append_max_ms << '\n';
         }
 
         int run_tests(const bool benchmark)
@@ -593,7 +654,7 @@ namespace chalkag {
             if (benchmark)
             {
                 std::cout << "format,resolution,workload,mode,frames,encode_write_ms,container_ms,total_ms,temporary_"
-                             "bytes,output_bytes\n";
+                             "bytes,output_bytes,append_avg_ms,append_max_ms\n";
 
                 for (const auto format : { image_format::webp, image_format::apng })
                 {
@@ -628,6 +689,7 @@ namespace chalkag {
                     run_static(directory / "long", format, true);
                     run_timing(directory / "timing", format);
                     run_storage_failure(directory / "storage-failure", format);
+                    run_pipeline(directory / "pipeline", format);
                 }
 
                 run_invalid(files.directory / "invalid");

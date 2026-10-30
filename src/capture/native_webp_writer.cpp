@@ -353,45 +353,27 @@ namespace chalkag {
             }
         }
 
-        bool encode_wic_png(const std::filesystem::path& path, const SkPixmap& pixels)
+        bool valid_png_pixels(const SkPixmap& pixels)
+        {
+            return pixels.colorType() == kBGRA_8888_SkColorType && pixels.width() > 0 && pixels.height() > 0
+                && pixels.rowBytes() <= std::numeric_limits<UINT>::max()
+                && pixels.computeByteSize() <= std::numeric_limits<UINT>::max();
+        }
+
+        bool encode_wic_png(IWICImagingFactory* factory, const std::filesystem::path& path, const SkPixmap& pixels)
         {
             const std::size_t buffer_size { pixels.computeByteSize() };
 
-            if (pixels.colorType() != kBGRA_8888_SkColorType || pixels.width() <= 0 || pixels.height() <= 0
-                || pixels.rowBytes() > std::numeric_limits<UINT>::max()
-                || buffer_size > std::numeric_limits<UINT>::max())
+            if (!factory || !valid_png_pixels(pixels))
             {
                 return false;
             }
 
-            const auto initialized { CoInitializeEx(nullptr, COINIT_MULTITHREADED) };
-
-            if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE)
-            {
-                return false;
-            }
-
-            struct com_cleanup
-            {
-                bool initialized {};
-
-                ~com_cleanup()
-                {
-                    if (initialized)
-                    {
-                        CoUninitialize();
-                    }
-                }
-            };
-
-            const com_cleanup cleanup { SUCCEEDED(initialized) };
-            Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
             Microsoft::WRL::ComPtr<IWICStream> stream;
             Microsoft::WRL::ComPtr<IWICBitmapEncoder> encoder;
             Microsoft::WRL::ComPtr<IWICBitmapFrameEncode> frame;
 
-            if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))
-                || FAILED(factory->CreateStream(&stream))
+            if (FAILED(factory->CreateStream(&stream))
                 || FAILED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE))
                 || FAILED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder))
                 || FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache))
@@ -417,7 +399,56 @@ namespace chalkag {
                 && SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
         }
 
+        bool encode_wic_png(const std::filesystem::path& path, const SkPixmap& pixels)
+        {
+            if (!valid_png_pixels(pixels))
+            {
+                return false;
+            }
+
+            const wic_png_encoder encoder {};
+            return encoder.encode(path, pixels);
+        }
+
     } // namespace
+
+    struct wic_png_encoder::state
+    {
+        HRESULT initialized { CoInitializeEx(nullptr, COINIT_MULTITHREADED) };
+        Microsoft::WRL::ComPtr<IWICImagingFactory> factory {};
+
+        state()
+        {
+            if (SUCCEEDED(initialized) || initialized == RPC_E_CHANGED_MODE)
+            {
+                static_cast<void>(
+                    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))
+                );
+            }
+        }
+
+        ~state()
+        {
+            // COM을 해제하기 전에 팩터리를 놓아야 해제된 apartment에서 Release하지 않는다.
+            factory.Reset();
+
+            if (SUCCEEDED(initialized))
+            {
+                CoUninitialize();
+            }
+        }
+    };
+
+    wic_png_encoder::wic_png_encoder()
+        : state_ { std::make_unique<state>() }
+    {}
+
+    wic_png_encoder::~wic_png_encoder() = default;
+
+    bool wic_png_encoder::encode(const std::filesystem::path& path, const SkPixmap& pixels) const
+    {
+        return encode_wic_png(state_->factory.Get(), path, pixels);
+    }
 
     bool encode_native_image(
         const std::filesystem::path& path,
