@@ -173,9 +173,10 @@ namespace chalkag {
             const auto* const screenshot_popup { help_popup(*screenshot_frame) };
             const auto* const screenshot { screenshot_frame->tree->find({ command_kind, u8"take-screenshot" }) };
             check(
-                screenshot != nullptr && !screenshot->enabled(), "screenshot stays disabled without a selected region"
+                screenshot != nullptr && screenshot->enabled(),
+                "screenshot stays available without a region so it can select first and capture"
             );
-            check(screenshot_popup != nullptr, "disabled screenshot still provides custom help");
+            check(screenshot_popup != nullptr, "screenshot provides custom help");
 
             if (screenshot_popup != nullptr)
             {
@@ -190,14 +191,29 @@ namespace chalkag {
 
                 const auto body { help_name(*screenshot_popup, u8"help-body") };
                 check(
-                    body.starts_with(u8"먼저 캡쳐 영역을 선택하세요.\n\n"),
-                    "disabled screenshot explains missing region first"
+                    body.find(u8"영역이 없으면 먼저 영역을 고른 뒤 바로 촬영합니다.") != std::u8string::npos,
+                    "screenshot help explains that it selects a region first"
                 );
                 check(
                     body.find(u8"PNG 이미지로 저장합니다.") != std::u8string::npos,
                     "disabled screenshot retains format instructions"
                 );
             }
+
+            runtime_state recording {};
+            recording.countdown = 3;
+            recording.countdown_label = u8"3초 후 사진 촬영";
+            driver.handle(luil::app_message { recording });
+            send_target(driver, target(u8"take-screenshot"));
+            const auto recording_frame { frame_for(driver) };
+            const auto* const recording_popup { help_popup(*recording_frame) };
+            const auto* const blocked { recording_frame->tree->find({ command_kind, u8"take-screenshot" }) };
+            check(
+                blocked && !blocked->enabled() && recording_popup
+                    && help_name(*recording_popup, u8"help-body")
+                           .starts_with(u8"지연 촬영을 기다리는 중입니다. 취소 버튼으로 멈출 수 있습니다.\n\n"),
+                "disabled screenshot explains why it is blocked first"
+            );
         }
 
         void test_popup_lifetime()
@@ -292,14 +308,15 @@ namespace chalkag {
                 "FPS dropdown has an accessible name"
             );
 
-            const auto* const slider { frame->tree->find({ command_kind, u8"scale" }) };
             check(
-                slider != nullptr && !slider->accessibility().name.empty() && slider->accessibility().range.has_value(),
-                "output slider exposes a named accessible range"
+                frame->tree->find({ command_kind, u8"scale" }) == nullptr
+                    && frame->tree->find({ luil::ui_element_kind::choice, u8"animation-format/gif" }) == nullptr,
+                "capture tab leaves output size and animation format to the export tab"
             );
             check(
-                frame->tree->find({ luil::ui_element_kind::choice, u8"animation-format/gif" }) != nullptr,
-                "GIF remains visible without optional FFmpeg"
+                frame->tree->find({ luil::ui_element_kind::check, u8"copy-clipboard" }) != nullptr
+                    && frame->tree->find({ luil::ui_element_kind::choice, u8"capture-delay/3" }) != nullptr,
+                "capture tab offers clipboard copy and capture delay"
             );
 
             const auto* const popup { help_popup(*frame) };
@@ -322,6 +339,15 @@ namespace chalkag {
 
             driver.handle(luil::app_message { options_tab_intent { options_page::output } });
             const auto output_frame { frame_for(driver) };
+            const auto* const slider { output_frame->tree->find({ command_kind, u8"scale" }) };
+            check(
+                slider != nullptr && !slider->accessibility().name.empty() && slider->accessibility().range.has_value(),
+                "output slider exposes a named accessible range"
+            );
+            check(
+                output_frame->tree->find({ luil::ui_element_kind::choice, u8"animation-format/gif" }) != nullptr,
+                "GIF remains visible without optional FFmpeg"
+            );
             const auto* const compression {
                 output_frame->tree->find({ luil::ui_element_kind::choice, u8"compression/small" })
             };
@@ -460,11 +486,11 @@ namespace chalkag {
             driver.handle(luil::app_message { fps_menu_intent { true } });
 
             const auto locked { frame_for(driver) };
-            const auto* const slider { locked->tree->find({ command_kind, u8"scale" }) };
-            check(
-                locked->popups.empty() && slider != nullptr && !slider->enabled(),
-                "recording locks dropdown expansion and output slider"
-            );
+            check(locked->popups.empty(), "recording locks dropdown expansion");
+            driver.handle(luil::app_message { options_tab_intent { options_page::output } });
+            const auto locked_output { frame_for(driver) };
+            const auto* const slider { locked_output->tree->find({ command_kind, u8"scale" }) };
+            check(slider != nullptr && !slider->enabled(), "recording locks the output slider");
         }
 
         void test_popup_placement_and_guards()
@@ -730,67 +756,83 @@ namespace chalkag {
                         }
                     );
                     check(
-                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-discard-recording" }),
-                        "clear is hidden without a retained recording"
+                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-save-recording" }),
+                        "save is hidden without a retained recording"
                     );
 
                     state.recording = true;
                     driver.handle(luil::app_message { state });
+                    const auto recording_frame { frame_for(driver) };
+                    const auto* stop { recording_frame->tree->find({ command_kind, u8"toggle-recording" }) };
                     check(
-                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-discard-recording" }),
-                        "clear is hidden while recording"
+                        !recording_frame->tree->find({ command_kind, u8"toolbar-save-recording" }) && stop
+                            && stop->accessibility().name == u8"정지",
+                        "recording shows only the stop action"
                     );
                     state.recording = false;
                     state.pending_recording = true;
                     driver.handle(luil::app_message { state });
                     auto frame { frame_for(driver) };
-                    const auto* clear { frame->tree->find({ command_kind, u8"toolbar-discard-recording" }) };
-                    const auto* save { frame->tree->find({ command_kind, u8"toggle-recording" }) };
+                    const auto* record { frame->tree->find({ command_kind, u8"toggle-recording" }) };
+                    const auto* save { frame->tree->find({ command_kind, u8"toolbar-save-recording" }) };
                     const auto* options { frame->tree->find({ command_kind, u8"open-options" }) };
                     check(
-                        clear && clear->enabled() && clear->accessibility().name == u8"새 녹화",
-                        "retained recording exposes a new recording action"
+                        save && save->enabled() && save->accessibility().name == u8"저장",
+                        "retained recording exposes a separate save action"
                     );
-                    if (clear && save && options)
+                    if (record && save && options)
                     {
                         check(
-                            save->bounds().x + save->bounds().width + 6 * scale <= clear->bounds().x
-                                && clear->bounds().x + clear->bounds().width + 6 * scale <= options->bounds().x,
-                            "clear fits between save and options at every DPI and window size"
+                            record->bounds().x + record->bounds().width + 6 * scale <= save->bounds().x + 0.5f
+                                && save->bounds().x + save->bounds().width + 6 * scale <= options->bounds().x + 0.5f,
+                            "save fits between record and options at every DPI and window size"
                         );
-                        const auto actions { (*clear->action(luil::ui_trigger::left_click))({}) };
+                        const auto actions { (*record->action(luil::ui_trigger::left_click))({}) };
                         const auto* action { std::get_if<luil::app_ui_command>(&actions.front()) };
                         check(
                             action && action->command == static_cast<std::uint32_t>(runtime_command::new_recording),
-                            "new recording uses the safe replacement command"
+                            "record button starts a new recording through the safe replacement command"
+                        );
+                        const auto save_actions { (*save->action(luil::ui_trigger::left_click))({}) };
+                        const auto* save_action { std::get_if<luil::app_ui_command>(&save_actions.front()) };
+                        check(
+                            save_action
+                                && save_action->command == static_cast<std::uint32_t>(runtime_command::save_recording),
+                            "toolbar save exports the retained recording"
                         );
                     }
-                    send_target(driver, target(u8"toolbar-discard-recording"));
+                    send_target(driver, target(u8"toggle-recording"));
                     frame = frame_for(driver);
                     const auto* popup { help_popup(*frame) };
                     check(
-                        popup && popup->tree->find({ command_kind, u8"help-shortcut" }) == nullptr,
-                        "new recording never advertises the discard shortcut"
+                        popup && help_name(*popup, u8"help-shortcut").starts_with(u8"Ctrl+R"),
+                        "record help advertises the record shortcut, not the discard shortcut"
                     );
+
+                    state.recording_saved = true;
+                    driver.handle(luil::app_message { state });
+                    const auto saved_frame { frame_for(driver) };
+                    const auto* saved { saved_frame->tree->find({ command_kind, u8"toolbar-save-recording" }) };
+                    check(saved && saved->accessibility().name == u8"다시 저장", "saved recording offers saving again");
 
                     state.dialog = { message_dialog_kind::discard_recording, 1, u8"녹화 비우기", u8"확인" };
                     driver.handle(luil::app_message { state });
                     check(
-                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-discard-recording" })->enabled(),
-                        "confirmation blocks repeated clear commands"
+                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-save-recording" })->enabled(),
+                        "confirmation blocks repeated save commands"
                     );
                     state.dialog = {};
                     state.busy = true;
                     driver.handle(luil::app_message { state });
                     check(
-                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-discard-recording" }),
-                        "clear is hidden while saving"
+                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-save-recording" }),
+                        "save is hidden while saving"
                     );
                     state.busy = false;
                     state.pending_recording = false;
                     driver.handle(luil::app_message { state });
                     check(
-                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-discard-recording" }),
+                        !frame_for(driver)->tree->find({ command_kind, u8"toolbar-save-recording" }),
                         "clearing restores the idle toolbar"
                     );
                 }
@@ -884,14 +926,14 @@ namespace chalkag {
             const auto* shoot { frame->tree->find({ command_kind, u8"take-screenshot" }) };
             const auto* fps { frame->tree->find({ luil::ui_element_kind::dropdown, u8"fps" }) };
             check(
-                shoot && !shoot->enabled() && fps && !fps->enabled(),
-                "pending draft blocks new capture and keeps collected FPS locked"
+                shoot && shoot->enabled() && fps && !fps->enabled(),
+                "pending draft still allows stills and keeps collected FPS locked"
             );
 
-            const auto* scale { frame->tree->find({ command_kind, u8"scale" }) };
-            check(scale && scale->enabled(), "pending draft allows export scale changes");
             driver.handle(luil::app_message { options_tab_intent { options_page::output } });
             frame = frame_for(driver);
+            const auto* scale { frame->tree->find({ command_kind, u8"scale" }) };
+            check(scale && scale->enabled(), "pending draft allows export scale changes");
 
             const auto* save { frame->tree->find({ command_kind, u8"save-recording" }) };
             const auto* quality { frame->tree->find({ command_kind, u8"webp-quality" }) };
@@ -1419,13 +1461,25 @@ namespace chalkag {
 
             const auto page { frame_for(preferences) };
             const auto* input { page->tree->find({ luil::application_element_kind(6), u8"shortcut-select" }) };
+            const auto* picker { page->tree->find({ luil::ui_element_kind::choice_group, u8"accent-picker" }) };
+            const auto* glow { page->tree->find({ command_kind, u8"glow-width" }) };
             check(
-                input != nullptr && approximately_equal(input->bounds().y, 620),
-                "shortcut input follows theme preview cards in scroll content"
+                input != nullptr && picker != nullptr && glow != nullptr
+                    && input->bounds().y > glow->bounds().y + glow->bounds().height
+                    && glow->bounds().y > picker->bounds().y + picker->bounds().height,
+                "shortcut inputs follow appearance and frame settings in scroll content"
             );
             check(
                 page->tree->find({ command_kind, u8"apply-shortcuts" }) != nullptr,
                 "preferences expose shortcut apply action"
+            );
+            const auto* light { page->tree->find({ luil::ui_element_kind::choice, u8"theme/light" }) };
+            const auto* dark { page->tree->find({ luil::ui_element_kind::choice, u8"theme/dark" }) };
+            const auto* accent_label { page->tree->find({ command_kind, u8"accent-label" }) };
+            check(
+                light && dark && accent_label && approximately_equal(light->bounds().y, dark->bounds().y)
+                    && dark->bounds().y + dark->bounds().height <= accent_label->bounds().y,
+                "theme cards stay on one row beside the scroll bar and above the accent row"
             );
             const auto* clear_shortcut {
                 page->tree->find({ luil::application_element_kind(11), u8"shortcut-discard" })

@@ -469,6 +469,31 @@ namespace chalkag {
                 check_rejected_document(store, document, "glow width rejects out of range values");
             }
 
+            settings.copy_to_clipboard = false;
+            settings.capture_delay = 5;
+            settings.close_to_tray = true;
+            check(store.save(settings).empty(), "clipboard, delay and tray settings save");
+            const auto extra { store.load(warning) };
+            check(
+                warning.empty() && !extra.copy_to_clipboard && extra.capture_delay == 5 && extra.close_to_tray,
+                "clipboard, delay and tray settings round trip"
+            );
+            check(
+                legacy.copy_to_clipboard && legacy.capture_delay == 0 && !legacy.close_to_tray,
+                "legacy settings copy stills to the clipboard without delay or tray"
+            );
+
+            for (const int delay : { -1, 1, 4, 11 })
+            {
+                document = valid;
+                document["capture"]["delay"] = delay;
+                check_rejected_document(store, document, "capture delay rejects unsupported seconds");
+            }
+
+            document = valid;
+            document["window"]["close_to_tray"] = "true";
+            check_rejected_document(store, document, "tray option rejects strings");
+
             check(store.save(sample_settings()).empty(), "restore valid export fixture");
         }
 

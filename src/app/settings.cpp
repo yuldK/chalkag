@@ -111,6 +111,11 @@ namespace chalkag {
         void validate(const app_settings& settings)
         {
             require(settings.glow_width >= 0 && settings.glow_width <= 40, u8"글로우 두께는 0~40px여야 합니다.");
+            require(
+                settings.capture_delay == 0 || settings.capture_delay == 3 || settings.capture_delay == 5
+                    || settings.capture_delay == 10,
+                u8"촬영 지연은 0·3·5·10초 중 하나여야 합니다."
+            );
 
             const auto& appearance { settings.appearance };
             require(
@@ -291,6 +296,19 @@ namespace chalkag {
                 settings.auto_save = capture.at("auto_save").get<bool>();
             }
 
+            if (capture.contains("copy_to_clipboard"))
+            {
+                require(
+                    capture.at("copy_to_clipboard").is_boolean(), u8"클립보드 복사 설정은 참 또는 거짓이어야 합니다."
+                );
+                settings.copy_to_clipboard = capture.at("copy_to_clipboard").get<bool>();
+            }
+
+            if (capture.contains("delay"))
+            {
+                settings.capture_delay = read_integer(capture, "delay");
+            }
+
             // 이전 인코더 선택은 형식과 품질을 보존하고 현재 내장 인코더로 읽는다.
             if (capture.contains("encoder"))
             {
@@ -311,6 +329,14 @@ namespace chalkag {
                 if (window.contains("glow_width"))
                 {
                     settings.glow_width = read_integer(window, "glow_width");
+                }
+
+                if (window.contains("close_to_tray"))
+                {
+                    require(
+                        window.at("close_to_tray").is_boolean(), u8"트레이 숨기기 설정은 참 또는 거짓이어야 합니다."
+                    );
+                    settings.close_to_tray = window.at("close_to_tray").get<bool>();
                 }
 
                 if (window.contains("position"))
@@ -424,8 +450,11 @@ namespace chalkag {
             capture["webp_lossless"] = settings.capture.webp_lossless;
             capture["webp_quality"] = settings.capture.webp_quality;
             capture["auto_save"] = settings.auto_save;
+            capture["copy_to_clipboard"] = settings.copy_to_clipboard;
+            capture["delay"] = settings.capture_delay;
             nlohmann::json window { { "always_on_top", settings.always_on_top } };
             window["glow_width"] = settings.glow_width;
+            window["close_to_tray"] = settings.close_to_tray;
 
             if (settings.window_position)
             {

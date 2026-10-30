@@ -1,6 +1,8 @@
 #include "app/app_runtime.h"
 
+#include "app/clipboard.h"
 #include "app/command_window.h"
+#include "app/resource_ids.h"
 #include "app/single_instance.h"
 #include "capture/image_capture.h"
 #include "capture/region_controller.h"
@@ -120,6 +122,9 @@ namespace chalkag {
             return result;
         }
 
+        // 알림 영역 아이콘이 보내는 메시지다.
+        constexpr UINT tray_message { WM_APP + 1 };
+
         [[nodiscard]] std::u8string utf8_number(const int value)
         {
             const std::string text { std::to_string(value) };
@@ -172,6 +177,7 @@ namespace chalkag {
                 state_.glow_position = static_cast<float>(state_.settings.glow_width);
                 state_.quality_position = static_cast<float>(state_.settings.capture.webp_quality);
                 state_.shortcut_error = hotkeys_.initialize(state_.settings.shortcuts);
+                region_.set_selection_shortcut_text(format_hotkey(state_.settings.shortcuts[0]));
                 state_.status += state_.shortcut_error;
 
                 if (state_.status.empty())
@@ -181,6 +187,7 @@ namespace chalkag {
                 }
 
                 SetTimer(owner_, 200, 100, nullptr);
+                update_tray_icon();
                 publish();
             }
             catch (...)
@@ -333,6 +340,7 @@ namespace chalkag {
                     if (state_.shortcut_error.empty())
                     {
                         state_.settings = std::move(next);
+                        region_.set_selection_shortcut_text(format_hotkey(state_.settings.shortcuts[0]));
                     }
                     else
                     {
@@ -364,7 +372,7 @@ namespace chalkag {
 
             if (!apply_topmost(next.always_on_top))
             {
-                fail(u8"명령창의 항상 위 상태를 바꿀 수 없습니다.");
+                notify(u8"명령창의 항상 위 상태를 바꿀 수 없습니다.");
                 return;
             }
 
@@ -427,7 +435,7 @@ namespace chalkag {
                        ShellExecuteW(owner_, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL)
                    ) <= 32)
             {
-                fail(u8"저장 폴더를 열 수 없습니다. 설치 경로의 쓰기 권한을 확인하세요.");
+                notify(u8"저장 폴더를 열 수 없습니다. 설치 경로의 쓰기 권한을 확인하세요.");
             }
 
             return;
@@ -445,7 +453,7 @@ namespace chalkag {
 
             if (!std::filesystem::is_regular_file(state_.saved_output, error) || error)
             {
-                fail(u8"저장 파일을 찾을 수 없습니다. 파일이 이동되거나 삭제되었는지 확인하세요.");
+                notify(u8"저장 파일을 찾을 수 없습니다. 파일이 이동되거나 삭제되었는지 확인하세요.");
             }
             else if (
                 reinterpret_cast<INT_PTR>(
@@ -454,7 +462,7 @@ namespace chalkag {
                 <= 32
             )
             {
-                fail(u8"저장 파일을 열 수 없습니다. 이 이미지 형식을 열 수 있는 기본 앱을 확인하세요.");
+                notify(u8"저장 파일을 열 수 없습니다. 이 이미지 형식을 열 수 있는 기본 앱을 확인하세요.");
             }
 
             return;
@@ -469,6 +477,7 @@ namespace chalkag {
 
             const bool auto_save { state_.settings.auto_save };
             saving_recording_ = auto_save;
+            screenshot_job_ = false;
             state_.recording_saved = false;
             state_.save_cancel_requested = false;
             const auto options { state_.settings.capture };
@@ -492,6 +501,7 @@ namespace chalkag {
             const auto options { state_.settings.capture };
             state_.busy = true;
             saving_recording_ = true;
+            screenshot_job_ = false;
             state_.save_cancel_requested = false;
             reset_progress();
             state_.status = u8"보관한 녹화를 저장하는 중… 원본은 유지됩니다.";
@@ -513,7 +523,8 @@ namespace chalkag {
 
             const auto action { static_cast<runtime_command>(command.command) };
 
-            if (action == runtime_command::dismiss_dialog || action == runtime_command::confirm_dialog)
+            if (action == runtime_command::dismiss_dialog || action == runtime_command::confirm_dialog
+                || action == runtime_command::save_and_exit)
             {
                 const auto revision { std::to_string(state_.dialog.revision) };
 
@@ -525,6 +536,31 @@ namespace chalkag {
 
                 const auto kind { state_.dialog.kind };
                 state_.dialog = {};
+
+                if (action == runtime_command::dismiss_dialog)
+                {
+                    state_.quit_requested = false;
+                }
+
+                // 저장 후 종료는 저장이 끝난 뒤 창을 닫는다. 실패하면 안내만 남고 앱은 계속 돈다.
+                if (action == runtime_command::save_and_exit && kind == message_dialog_kind::exit_application
+                    && !state_.busy && !state_.recording)
+                {
+                    exit_after_job_ = true;
+                    save_recording();
+                    return;
+                }
+
+                if (action == runtime_command::confirm_dialog && kind == message_dialog_kind::exit_while_saving
+                    && state_.busy)
+                {
+                    exit_after_job_ = true;
+                    capture_.request_save_cancel();
+                    state_.save_cancel_requested = true;
+                    state_.status = u8"저장을 취소하고 종료하는 중…";
+                    publish();
+                    return;
+                }
 
                 if (action == runtime_command::confirm_dialog
                     && (kind == message_dialog_kind::discard_recording
@@ -619,19 +655,39 @@ namespace chalkag {
 
             if (action == runtime_command::request_close)
             {
-                if (state_.busy || state_.recording)
+                show_from_tray();
+
+                if (state_.recording)
                 {
                     show_dialog(
-                        message_dialog_kind::information, u8"작업 진행 중", u8"촬영·저장을 마친 뒤 종료하세요."
+                        message_dialog_kind::information,
+                        u8"녹화 중입니다",
+                        u8"녹화를 정지한 뒤 종료하세요. 정지 단축키: " + shortcut_name(2)
                     );
                 }
-                else if (state_.pending_recording)
+                else if (state_.busy)
+                {
+                    show_dialog(
+                        message_dialog_kind::exit_while_saving,
+                        u8"저장 중입니다",
+                        state_.pending_recording
+                            ? u8"저장을 취소하고 종료하면 보관한 녹화 원본도 비워집니다. 이미 저장한 파일은 유지됩니다."
+                            : u8"저장을 취소하고 종료하면 지금 저장 중인 이미지는 만들어지지 않습니다."
+                    );
+                }
+                else if (state_.pending_recording && !state_.recording_saved)
                 {
                     show_dialog(
                         message_dialog_kind::exit_application,
-                        u8"종료할까요?",
-                        u8"보관한 녹화 원본을 비우고 종료합니다. 이미 저장한 파일은 유지됩니다."
+                        u8"저장하지 않은 녹화가 있습니다",
+                        u8"지금 저장하면 내보내기 탭의 형식·크기·품질로 파일을 만든 뒤 종료합니다. 버리면 보관한 "
+                        u8"원본이 "
+                        u8"비워집니다."
                     );
+                }
+                else
+                {
+                    request_exit();
                 }
                 return;
             }
@@ -649,6 +705,39 @@ namespace chalkag {
                 return;
             }
 
+            if (action == runtime_command::copy_saved_output)
+            {
+                copy_saved_output(true);
+                return;
+            }
+
+            if (action == runtime_command::hide_to_tray)
+            {
+                hide_to_tray();
+                return;
+            }
+
+            if (action == runtime_command::show_window)
+            {
+                show_from_tray(true);
+                return;
+            }
+
+            if (action == runtime_command::quit_application)
+            {
+                show_from_tray();
+                state_.quit_requested = true;
+                publish();
+                execute_command({ static_cast<std::uint32_t>(runtime_command::request_close) });
+                return;
+            }
+
+            if (action == runtime_command::cancel_countdown)
+            {
+                cancel_countdown();
+                return;
+            }
+
             if (state_.busy)
             {
                 return;
@@ -662,6 +751,36 @@ namespace chalkag {
 
             if (state_.recording)
             {
+                return;
+            }
+
+            const bool capture_command { action == runtime_command::take_screenshot
+                                         || action == runtime_command::toggle_recording
+                                         || action == runtime_command::new_recording
+            };
+
+            // 기다리는 동안 같은 촬영 명령을 다시 누르면 취소하고, 다른 명령은 받지 않는다.
+            if (state_.countdown > 0)
+            {
+                if (capture_command)
+                {
+                    cancel_countdown();
+                }
+
+                return;
+            }
+
+            // 녹화 단축키도 버튼과 같이 보관 원본이 있으면 새 녹화로 시작한다.
+            if (action == runtime_command::toggle_recording && state_.pending_recording)
+            {
+                execute_command({ static_cast<std::uint32_t>(runtime_command::new_recording) });
+                return;
+            }
+
+            if (capture_command && !state_.queued_capture.empty())
+            {
+                // 영역을 고르는 중에 다시 누르면 고른 뒤 할 일만 바꾼다.
+                queue_capture(action);
                 return;
             }
 
@@ -739,7 +858,7 @@ namespace chalkag {
                             CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))
                         ))
                     {
-                        fail(u8"이미지 선택 창을 열 수 없습니다.");
+                        notify(u8"이미지 선택 창을 열 수 없습니다.");
                         return;
                     }
 
@@ -761,7 +880,7 @@ namespace chalkag {
                     if (FAILED(shown) || FAILED(dialog->GetResult(&item))
                         || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)))
                     {
-                        fail(u8"선택한 이미지 경로를 읽을 수 없습니다.");
+                        notify(u8"선택한 이미지 경로를 읽을 수 없습니다.");
                         return;
                     }
 
@@ -858,90 +977,19 @@ namespace chalkag {
 
             if (action == runtime_command::take_screenshot || action == runtime_command::toggle_recording)
             {
-                if (state_.pending_recording && action == runtime_command::toggle_recording)
+                if (!region_.current_region())
                 {
-                    fail(u8"보관한 녹화를 저장하고 비운 뒤 새 캡쳐를 시작하세요.");
+                    queue_capture(action);
                     return;
                 }
 
-                close_editor();
-
-                const auto selected { region_.current_region() };
-
-                if (!selected.has_value())
+                if (state_.settings.capture_delay > 0)
                 {
-                    fail(u8"먼저 캡쳐 영역을 선택하세요.");
+                    start_countdown(action);
                     return;
                 }
 
-                const bool frame_excluded { region_.set_capture_active(true) };
-
-                if (!SetWindowDisplayAffinity(owner_, WDA_EXCLUDEFROMCAPTURE))
-                {
-                    // 명령창이 영역에 겹친 경우에는 확실하게 숨긴 뒤 복원한다.
-                    RECT bounds {};
-                    GetWindowRect(owner_, &bounds);
-                    RECT capture_bounds {
-                        selected->x, selected->y, selected->x + selected->width, selected->y + selected->height
-                    };
-                    RECT overlap {};
-                    owner_hidden_ = IntersectRect(&overlap, &bounds, &capture_bounds) != FALSE;
-
-                    if (owner_hidden_)
-                    {
-                        ShowWindow(owner_, SW_HIDE);
-                    }
-                }
-
-                DwmFlush();
-
-                if (action == runtime_command::toggle_recording)
-                {
-                    if (owner_hidden_ && !hotkeys_.active(2))
-                    {
-                        restore_capture_windows();
-                        fail(
-                            u8"정지 단축키를 사용할 수 없습니다. 명령창을 캡쳐 영역 밖으로 옮기거나 앱 설정에서 정지 "
-                            u8"단축키를 변경하세요."
-                        );
-                        return;
-                    }
-
-                    const capture_result result { capture_.start_recording(*selected, state_.settings.capture) };
-
-                    if (!result.success)
-                    {
-                        restore_capture_windows();
-                        fail(result.message);
-                        return;
-                    }
-
-                    state_.recording = true;
-                    state_.saved_summary.clear();
-                    state_.recording_saved = false;
-                    started_ = std::chrono::steady_clock::now();
-                    elapsed_ = -1;
-                    state_.elapsed_seconds = 0;
-                    region_.set_recording_elapsed(0);
-                    state_.status = frame_excluded ? u8"녹화 중 · " + shortcut_name(2) + u8"으로 정지"
-                                                   : u8"녹화 중 · 프레임 제외 미지원으로 프레임을 숨겼습니다.";
-                    publish();
-                }
-                else
-                {
-                    state_.busy = true;
-                    saving_recording_ = false;
-                    state_.save_cancel_requested = false;
-                    reset_progress();
-                    state_.status = u8"스크린샷 저장 중…";
-                    publish();
-
-                    const auto options { state_.settings.capture };
-                    job_ = std::async(std::launch::async, [this, selected, options] {
-                        return capture_.take_screenshot(*selected, options, progress_observer());
-                    });
-                }
-
+                start_capture(action);
                 return;
             }
 
@@ -1037,7 +1085,7 @@ namespace chalkag {
 
                 if (!selected.has_value() || next.presets.size() >= 64)
                 {
-                    fail(u8"영역을 선택하세요. 프리셋은 최대 64개까지 저장할 수 있습니다.");
+                    notify(u8"영역을 선택하세요. 프리셋은 최대 64개까지 저장할 수 있습니다.");
                     return;
                 }
 
@@ -1177,6 +1225,25 @@ namespace chalkag {
             {
                 next.auto_save = !next.auto_save;
             }
+            else if (action == runtime_command::toggle_clipboard)
+            {
+                next.copy_to_clipboard = !next.copy_to_clipboard;
+            }
+            else if (action == runtime_command::toggle_close_to_tray)
+            {
+                next.close_to_tray = !next.close_to_tray;
+            }
+            else if (action == runtime_command::set_capture_delay)
+            {
+                const int value { number(command.argument) };
+
+                if (command.argument.empty() || (value != 0 && value != 3 && value != 5 && value != 10))
+                {
+                    return;
+                }
+
+                next.capture_delay = value;
+            }
             else if (action == runtime_command::set_webp_mode)
             {
                 next.capture.webp_lossless = command.argument != u8"lossy";
@@ -1282,6 +1349,11 @@ namespace chalkag {
                 region_.set_appearance(state_.settings.appearance);
             }
 
+            if (action == runtime_command::toggle_close_to_tray)
+            {
+                update_tray_icon();
+            }
+
             state_.output_step = next_step;
 
             if (action == runtime_command::save_preset)
@@ -1300,6 +1372,287 @@ namespace chalkag {
         }
 
     private:
+        // 창을 띄우지 않고 상태 줄에 잠깐 보여 준다. 저장 실패처럼 꼭 읽어야 하는 것은 fail을 쓴다.
+        void notify(const std::u8string& message, const bool error = true)
+        {
+            state_.notice = message;
+            state_.notice_error = error;
+            state_.status = message;
+            notice_until_ = std::chrono::steady_clock::now() + std::chrono::seconds { 6 };
+            publish();
+        }
+
+        [[nodiscard]] static std::u8string capture_name(const runtime_command action)
+        {
+            return action == runtime_command::take_screenshot ? u8"사진 촬영" : u8"녹화 시작";
+        }
+
+        // 영역이 없으면 먼저 고르게 하고, 고르는 즉시 이어서 촬영한다.
+        void queue_capture(const runtime_command action)
+        {
+            queued_action_ = action;
+            state_.queued_capture = capture_name(action);
+            close_editor();
+
+            if (!region_.selecting())
+            {
+                region_.begin_selection();
+            }
+
+            publish();
+        }
+
+        void start_countdown(const runtime_command action)
+        {
+            countdown_action_ = action;
+            countdown_end_ = std::chrono::steady_clock::now() + std::chrono::seconds { state_.settings.capture_delay };
+            state_.countdown = state_.settings.capture_delay;
+            state_.countdown_label = utf8_number(state_.countdown) + u8"초 후 " + capture_name(action);
+            state_.status = state_.countdown_label + u8" · 같은 단축키나 취소 버튼으로 멈춥니다.";
+            publish();
+        }
+
+        void cancel_countdown()
+        {
+            if (state_.countdown == 0)
+            {
+                return;
+            }
+
+            state_.countdown = 0;
+            state_.countdown_label.clear();
+            notify(u8"지연 촬영을 취소했습니다.", false);
+        }
+
+        // 사진은 그림과 파일로, 애니메이션은 움직임이 남도록 파일로만 넣는다.
+        void copy_saved_output(const bool requested)
+        {
+            if (state_.saved_output.empty())
+            {
+                return;
+            }
+
+            const auto error { copy_file_to_clipboard(owner_, state_.saved_output, !saved_animation_) };
+
+            if (!error.empty())
+            {
+                notify(error);
+            }
+            else if (requested)
+            {
+                notify(
+                    saved_animation_ ? u8"파일을 클립보드에 복사했습니다." : u8"사진을 클립보드에 복사했습니다.", false
+                );
+            }
+        }
+
+        // 종료를 정한 뒤 다음 틱에 닫기를 보내 새 frame의 닫힘 훅이 그 결정을 따르게 한다.
+        void request_exit()
+        {
+            state_.exiting = true;
+            publish();
+            close_post_at_ = std::chrono::steady_clock::now() + std::chrono::milliseconds { 150 };
+        }
+
+        void update_tray_icon()
+        {
+            const bool wanted { state_.settings.close_to_tray || state_.hidden };
+            NOTIFYICONDATAW data { sizeof(NOTIFYICONDATAW) };
+            data.hWnd = owner_;
+            data.uID = 1;
+
+            if (wanted && !tray_added_)
+            {
+                data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
+                data.uCallbackMessage = tray_message;
+                data.hIcon = static_cast<HICON>(LoadImageW(
+                    GetModuleHandleW(nullptr),
+                    MAKEINTRESOURCEW(CHALKAG_ICON_RESOURCE),
+                    IMAGE_ICON,
+                    GetSystemMetrics(SM_CXSMICON),
+                    GetSystemMetrics(SM_CYSMICON),
+                    0
+                ));
+                wcscpy_s(data.szTip, L"chalkag");
+                tray_added_ = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
+
+                if (tray_added_)
+                {
+                    data.uVersion = NOTIFYICON_VERSION_4;
+                    Shell_NotifyIconW(NIM_SETVERSION, &data);
+                }
+
+                if (data.hIcon != nullptr)
+                {
+                    DestroyIcon(data.hIcon);
+                }
+            }
+            else if (!wanted && tray_added_)
+            {
+                Shell_NotifyIconW(NIM_DELETE, &data);
+                tray_added_ = false;
+            }
+        }
+
+        void hide_to_tray()
+        {
+            region_.cancel_selection();
+            queued_action_.reset();
+            state_.queued_capture.clear();
+            state_.hidden = true;
+            update_tray_icon();
+
+            if (!tray_added_)
+            {
+                // 알림 영역을 쓸 수 없으면 숨기지 않는다. 숨긴 창을 다시 열 길이 없어진다.
+                state_.hidden = false;
+                notify(u8"알림 영역 아이콘을 만들 수 없어 창을 숨기지 않았습니다.");
+                return;
+            }
+
+            publish();
+        }
+
+        // 알림 영역에 숨긴 창을 다시 보인다. 사용자가 직접 연 경우에는 앞으로 가져온다.
+        void show_from_tray(const bool activate = false)
+        {
+            if (activate && !owner_hidden_)
+            {
+                activate_after_show_ = true;
+            }
+
+            if (!state_.hidden)
+            {
+                return;
+            }
+
+            activate_after_show_ = true;
+            state_.hidden = false;
+            update_tray_icon();
+            publish();
+        }
+
+        void show_tray_menu(const POINT point)
+        {
+            const HMENU menu { CreatePopupMenu() };
+
+            if (menu == nullptr)
+            {
+                return;
+            }
+
+            AppendMenuW(menu, MF_STRING, 1, L"명령창 열기");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(menu, MF_STRING | (state_.recording ? MF_GRAYED : 0), 2, L"영역 선택");
+            AppendMenuW(menu, MF_STRING | (state_.recording ? MF_GRAYED : 0), 3, L"사진");
+            AppendMenuW(menu, MF_STRING, 4, state_.recording ? L"녹화 정지" : L"녹화");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(menu, MF_STRING, 5, L"종료");
+            SetForegroundWindow(owner_);
+            const auto chosen { TrackPopupMenu(
+                menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, point.x, point.y, 0, owner_, nullptr
+            )
+            };
+            DestroyMenu(menu);
+            PostMessageW(owner_, WM_NULL, 0, 0);
+
+            const auto action { chosen == 1       ? runtime_command::show_window
+                                    : chosen == 2 ? runtime_command::select_region
+                                    : chosen == 3 ? runtime_command::take_screenshot
+                                    : chosen == 4 ? runtime_command::toggle_recording
+                                    : chosen == 5 ? runtime_command::quit_application
+                                                  : runtime_command {}
+            };
+
+            if (action != runtime_command {})
+            {
+                execute({ .command = static_cast<std::uint32_t>(action) });
+            }
+        }
+
+        // 선택한 영역으로 사진 저장이나 녹화를 바로 시작한다.
+        void start_capture(const runtime_command action)
+        {
+            close_editor();
+
+            const auto selected { region_.current_region() };
+
+            if (!selected.has_value())
+            {
+                queue_capture(action);
+                return;
+            }
+
+            const bool frame_excluded { region_.set_capture_active(true) };
+
+            if (!SetWindowDisplayAffinity(owner_, WDA_EXCLUDEFROMCAPTURE))
+            {
+                // 명령창이 영역에 겹친 경우에는 확실하게 숨긴 뒤 복원한다.
+                RECT bounds {};
+                GetWindowRect(owner_, &bounds);
+                RECT capture_bounds {
+                    selected->x, selected->y, selected->x + selected->width, selected->y + selected->height
+                };
+                RECT overlap {};
+                owner_hidden_ = IntersectRect(&overlap, &bounds, &capture_bounds) != FALSE;
+
+                if (owner_hidden_)
+                {
+                    ShowWindow(owner_, SW_HIDE);
+                }
+            }
+
+            DwmFlush();
+
+            if (action == runtime_command::toggle_recording)
+            {
+                if (owner_hidden_ && !hotkeys_.active(2))
+                {
+                    restore_capture_windows();
+                    fail(
+                        u8"정지 단축키를 사용할 수 없습니다. 명령창을 캡쳐 영역 밖으로 옮기거나 앱 설정에서 정지 "
+                        u8"단축키를 변경하세요."
+                    );
+                    return;
+                }
+
+                const capture_result result { capture_.start_recording(*selected, state_.settings.capture) };
+
+                if (!result.success)
+                {
+                    restore_capture_windows();
+                    fail(result.message);
+                    return;
+                }
+
+                state_.recording = true;
+                state_.saved_summary.clear();
+                state_.recording_saved = false;
+                started_ = std::chrono::steady_clock::now();
+                elapsed_ = -1;
+                state_.elapsed_seconds = 0;
+                region_.set_recording_elapsed(0);
+                state_.status = frame_excluded ? u8"녹화 중 · " + shortcut_name(2) + u8"으로 정지"
+                                               : u8"녹화 중 · 프레임 제외 미지원으로 프레임을 숨겼습니다.";
+                publish();
+            }
+            else
+            {
+                state_.busy = true;
+                saving_recording_ = false;
+                screenshot_job_ = true;
+                state_.save_cancel_requested = false;
+                reset_progress();
+                state_.status = u8"스크린샷 저장 중…";
+                publish();
+
+                const auto options { state_.settings.capture };
+                job_ = std::async(std::launch::async, [this, selected, options] {
+                    return capture_.take_screenshot(*selected, options, progress_observer());
+                });
+            }
+        }
+
         [[nodiscard]] std::u8string shortcut_name(const std::size_t index) const
         {
             const auto text { format_hotkey(state_.settings.shortcuts[index]) };
@@ -1355,6 +1708,7 @@ namespace chalkag {
 
         void show_dialog(const message_dialog_kind kind, std::u8string title, std::u8string body)
         {
+            show_from_tray();
             close_editor();
             host_->post_app_message(luil::app_message { fps_menu_intent { false } });
             state_.dialog = { kind, ++dialog_revision_, std::move(title), std::move(body) };
@@ -1408,6 +1762,71 @@ namespace chalkag {
 
             poll_help();
 
+            const auto now { std::chrono::steady_clock::now() };
+
+            if (!state_.notice.empty() && now >= notice_until_)
+            {
+                state_.notice.clear();
+                publish();
+            }
+
+            if (close_post_at_ && now >= *close_post_at_)
+            {
+                close_post_at_.reset();
+                PostMessageW(owner_, WM_CLOSE, 0, 0);
+            }
+
+            if (activate_after_show_ && IsWindowVisible(owner_))
+            {
+                activate_after_show_ = false;
+                SetForegroundWindow(owner_);
+            }
+
+            // 영역을 다 고르면 기다리던 촬영을 이어서 시작한다. 취소했으면 버린다.
+            if (queued_action_ && !region_.selecting())
+            {
+                const auto action { *queued_action_ };
+                queued_action_.reset();
+                state_.queued_capture.clear();
+
+                if (region_.current_region() && !state_.busy && !state_.recording
+                    && state_.dialog.kind == message_dialog_kind::none)
+                {
+                    execute({ .command = static_cast<std::uint32_t>(action) });
+                }
+                else
+                {
+                    publish();
+                }
+            }
+
+            if (state_.countdown > 0)
+            {
+                const auto remaining { std::chrono::ceil<std::chrono::seconds>(countdown_end_ - now).count() };
+
+                if (remaining <= 0)
+                {
+                    state_.countdown = 0;
+                    state_.countdown_label.clear();
+
+                    if (!state_.busy && !state_.recording && state_.dialog.kind == message_dialog_kind::none)
+                    {
+                        start_capture(countdown_action_);
+                    }
+                    else
+                    {
+                        publish();
+                    }
+                }
+                else if (remaining != state_.countdown)
+                {
+                    state_.countdown = static_cast<int>(remaining);
+                    state_.countdown_label
+                        = utf8_number(state_.countdown) + u8"초 후 " + capture_name(countdown_action_);
+                    publish();
+                }
+            }
+
             if (state_.busy)
             {
                 save_progress latest {};
@@ -1459,6 +1878,7 @@ namespace chalkag {
                 if (result.success && !result.output.empty())
                 {
                     state_.saved_output = result.output;
+                    saved_animation_ = !screenshot_job_;
 
                     if (saving_recording_)
                     {
@@ -1489,12 +1909,25 @@ namespace chalkag {
                 state_.status = result.message;
                 publish();
 
+                if (result.success && screenshot_job_ && !result.output.empty() && state_.settings.copy_to_clipboard)
+                {
+                    copy_saved_output(false);
+                }
+
                 if (!result.success && !cancelled)
                 {
+                    exit_after_job_ = false;
                     fail(result.message);
                 }
 
+                if (exit_after_job_)
+                {
+                    exit_after_job_ = false;
+                    request_exit();
+                }
+
                 saving_recording_ = false;
+                screenshot_job_ = false;
             }
 
             if (state_.recording && capture_.recording_failed() && !state_.busy)
@@ -1700,6 +2133,15 @@ namespace chalkag {
             {}
             host_ = nullptr;
             KillTimer(owner_, 200);
+
+            if (tray_added_)
+            {
+                NOTIFYICONDATAW data { sizeof(NOTIFYICONDATAW) };
+                data.hWnd = owner_;
+                data.uID = 1;
+                Shell_NotifyIconW(NIM_DELETE, &data);
+                tray_added_ = false;
+            }
             hotkeys_.clear();
             RemoveWindowSubclass(owner_, owner_proc, 2);
             capture_.request_cancel();
@@ -1789,6 +2231,35 @@ namespace chalkag {
                 {}
                 return 0;
             }
+            else if (message == tray_message && self->host_ != nullptr)
+            {
+                try
+                {
+                    const auto event { LOWORD(lparam) };
+
+                    if (event == WM_CONTEXTMENU)
+                    {
+                        self->show_tray_menu({ GET_X_LPARAM(wparam), GET_Y_LPARAM(wparam) });
+                    }
+                    else if (event == NIN_SELECT || event == NIN_KEYSELECT || event == WM_LBUTTONDBLCLK)
+                    {
+                        self->execute({ .command = static_cast<std::uint32_t>(runtime_command::show_window) });
+                    }
+                }
+                catch (...)
+                {}
+                return 0;
+            }
+            else if (message == single_instance_show_message && self->host_ != nullptr)
+            {
+                try
+                {
+                    self->execute({ .command = static_cast<std::uint32_t>(runtime_command::show_window) });
+                }
+                catch (...)
+                {}
+                return 0;
+            }
             else if (message == WM_HOTKEY && wparam >= 101 && wparam < 101 + default_hotkeys.size())
             {
                 try
@@ -1820,6 +2291,16 @@ namespace chalkag {
         HWND owner_ {};
         global_hotkeys hotkeys_;
         bool saving_recording_ {};
+        bool screenshot_job_ {};
+        bool saved_animation_ {};
+        bool exit_after_job_ {};
+        bool tray_added_ {};
+        bool activate_after_show_ {};
+        std::optional<runtime_command> queued_action_ {};
+        runtime_command countdown_action_ {};
+        std::chrono::steady_clock::time_point countdown_end_ {};
+        std::chrono::steady_clock::time_point notice_until_ {};
+        std::optional<std::chrono::steady_clock::time_point> close_post_at_ {};
         std::optional<region_preset> deleted_preset_ {};
         std::size_t deleted_preset_index_ {};
 

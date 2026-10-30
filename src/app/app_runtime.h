@@ -62,6 +62,15 @@ namespace chalkag {
         show_output_options,
         show_capture_options,
         request_close,
+        toggle_clipboard,
+        set_capture_delay,
+        toggle_close_to_tray,
+        copy_saved_output,
+        cancel_countdown,
+        save_and_exit,
+        hide_to_tray,
+        show_window,
+        quit_application,
     };
 
     struct runtime_state
@@ -89,10 +98,21 @@ namespace chalkag {
         std::u8string saved_summary {};
         std::filesystem::path saved_output {};
         message_dialog_state dialog {};
+        // 창 대신 잠깐 보여 주는 안내다. 비어 있으면 없다.
+        std::u8string notice {};
+        bool notice_error { true };
+        // 지연 촬영의 남은 초와 무엇을 시작할지다. 0이면 기다리는 중이 아니다.
+        int countdown {};
+        std::u8string countdown_label {};
+        // 영역을 고르면 바로 시작할 촬영이다. 비어 있으면 없다.
+        std::u8string queued_capture {};
+        bool hidden {};
+        bool quit_requested {};
+        bool exiting {};
     };
 
     inline constexpr int options_window_width { 480 };
-    inline constexpr int options_window_height { 810 };
+    inline constexpr int options_window_height { 760 };
 
     class app_runtime final
     {

@@ -188,15 +188,46 @@ namespace chalkag {
                 editor.handle(luil::app_message { animation_editor_edit_intent { request } }), "edit duration input"
             );
             require(editor.has_pending_inputs() && editor.has_unsaved_changes(), "unapplied input needs protection");
+            send(editor, animation_editor_action::apply_inputs);
+            require(
+                !editor.has_pending_inputs() && editor.has_unsaved_changes(), "Enter applies a valid input as an edit"
+            );
+            send(editor, animation_editor_action::undo);
+            require(!editor.has_unsaved_changes(), "an applied input is one undo step");
+            send(editor, animation_editor_action::redo);
+
+            // 받아들일 수 없는 값은 칸에 남기고 이동·저장을 막는다.
+            const luil::text_edit_request invalid { .target = static_cast<luil::text_input_target>(301),
+                                                    .command = luil::text::text_edit_command::replace_all,
+                                                    .text = u8"0"
+            };
+            require(
+                editor.handle(luil::app_message { animation_editor_edit_intent { invalid } }), "edit invalid input"
+            );
+            require(editor.has_invalid_inputs(), "out of range input is reported as invalid");
             const auto position { value(editor, u8"edit-position") };
             send(editor, animation_editor_action::next);
-            require(value(editor, u8"edit-position") == position, "frame navigation preserves unapplied input");
+            require(value(editor, u8"edit-position") == position, "frame navigation keeps an invalid input in place");
             send(editor, animation_editor_action::export_file);
             require(
-                value(editor, u8"edit-status").starts_with(u8"적용 전 입력"), "export never ignores unapplied input"
+                value(editor, u8"edit-status").starts_with(u8"표시 시간은 1~600,000ms"),
+                "export never ignores an invalid input"
             );
-            send(editor, animation_editor_action::apply_delay);
-            require(!editor.has_pending_inputs() && editor.has_unsaved_changes(), "applied edit remains unsaved");
+            send(editor, animation_editor_action::reset_inputs);
+            require(!editor.has_pending_inputs(), "resetting inputs restores the current edit");
+
+            // 올바른 값은 다음 프레임으로 넘어갈 때 먼저 반영한다.
+            const luil::text_edit_request pending { .target = static_cast<luil::text_input_target>(301),
+                                                    .command = luil::text::text_edit_command::replace_all,
+                                                    .text = u8"150"
+            };
+            require(editor.handle(luil::app_message { animation_editor_edit_intent { pending } }), "edit next input");
+            send(editor, animation_editor_action::next);
+            require(
+                !editor.has_pending_inputs() && value(editor, u8"edit-position") != position,
+                "frame navigation applies a valid input first"
+            );
+            require(editor.has_unsaved_changes(), "applied edit remains unsaved");
             const auto edited { value(editor, u8"edit-summary") };
             require(editor.handle(luil::app_message { source }), "request source replacement");
             require(editor.confirmation(1).has_value(), "source replacement requires confirmation");

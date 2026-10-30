@@ -13,6 +13,8 @@ namespace chalkag {
         discard_recording,
         exit_application,
         replace_recording,
+        // 저장 중에 종료를 요청했다. 확인하면 저장을 취소하고 끝낸다.
+        exit_while_saving,
     };
 
     struct message_dialog_state

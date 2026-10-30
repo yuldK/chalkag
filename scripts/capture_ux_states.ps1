@@ -42,12 +42,12 @@ else
 {
     $null = Wait-LuilElement -id edit-play -all_surfaces -timeout_seconds 20
     shot '예제 애니메이션 편집' 'edit-play'
+    Set-LuilValue (Wait-LuilElement -id edit-delay -all_surfaces) -value '0'
+    $null = Wait-LuilElement -id edit-reset-inputs -all_surfaces -timeout_seconds 5
+    shot '받아들일 수 없는 입력을 표시' 'edit-play'
     Set-LuilValue (Wait-LuilElement -id edit-delay -all_surfaces) -value '123'
-    $null = Wait-LuilElement -id edit-reset-inputs -all_surfaces
-    shot '적용 전 입력을 명시적으로 표시' 'edit-play'
-    Invoke-LuilElement (Wait-LuilElement -id edit-apply-delay -all_surfaces)
-    $null = Wait-LuilElement -id edit-reset-inputs -all_surfaces -absent
-    shot '적용한 변경은 저장 전 상태로 표시' 'edit-play'
+    $null = Wait-LuilElement -id edit-reset-inputs -all_surfaces -absent -timeout_seconds 5
+    shot '입력은 바로 반영하고 저장 전 상태로 표시' 'edit-play'
     Invoke-LuilElement (Wait-LuilElement -name '닫기' -all_surfaces)
     $null = Wait-LuilElement -id editor-keep -all_surfaces
     shot '종료 전에 편집 내용 보호' 'editor-keep'

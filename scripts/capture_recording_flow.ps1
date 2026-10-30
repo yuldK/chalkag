@@ -70,22 +70,22 @@ $null = Wait-LuilElement -name '정지'
 shot '2 · 실제 녹화 작업 시작 · 합성 프레임'
 Start-Sleep -Milliseconds 350
 Invoke-LuilElement (Wait-LuilElement -id toggle-recording)
-$null = Wait-LuilElement -id toolbar-discard-recording -timeout_seconds 20
+$null = Wait-LuilElement -id toolbar-save-recording -timeout_seconds 20
 shot '3 · 정지 후 원본 보관'
 if (-not (Get-LuilState (Wait-LuilElement -id take-screenshot)).enabled) { throw '보관 중 사진 비활성' }
 Invoke-LuilElement (Wait-LuilElement -id take-screenshot)
-$null = Wait-LuilElement -id toolbar-discard-recording -timeout_seconds 20
+$null = Wait-LuilElement -id toolbar-save-recording -timeout_seconds 20
 $null = Wait-LuilElement -id saved-file
 shot '4 · 보관 원본을 유지한 사진 저장'
-Invoke-LuilElement (Wait-LuilElement -id toggle-recording)
+Invoke-LuilElement (Wait-LuilElement -id toolbar-save-recording)
 $null = Wait-LuilElement -name '다시 저장' -timeout_seconds 20
 shot '5 · 녹화 내보내기 완료 · 결과 열기'
-Invoke-LuilElement (Wait-LuilElement -id toolbar-discard-recording)
+Invoke-LuilElement (Wait-LuilElement -id toggle-recording)
 $null = Wait-LuilElement -name '정지' -timeout_seconds 20
 shot '6 · 저장한 원본은 새 녹화로 바로 교체'
 Start-Sleep -Milliseconds 200
 Invoke-LuilElement (Wait-LuilElement -id toggle-recording)
-$null = Wait-LuilElement -id toolbar-discard-recording -timeout_seconds 20
+$null = Wait-LuilElement -id toolbar-save-recording -timeout_seconds 20
 shot '7 · 다음 녹화 원본 보관 · 이전 저장과 구분'
 Get-LuilState (Wait-LuilElement -id take-screenshot)
 Get-LuilState (Wait-LuilElement -id capture-state)
@@ -99,7 +99,8 @@ Invoke-LuilElement (Wait-LuilElement -id quick-edit-recording)
 $null = Wait-LuilElement -id edit-play -all_surfaces -timeout_seconds 20
 checkpoint '보관 원본 편집 열기'
 Set-LuilValue (Wait-LuilElement -id edit-delay -all_surfaces) -value '600000'
-Invoke-LuilElement (Wait-LuilElement -id edit-apply-delay -all_surfaces)
+# 입력은 잠깐 멈추면 바로 반영된다.
+$null = Wait-LuilElement -name '저장 전 변경' -all_surfaces -timeout_seconds 5
 Invoke-LuilElement (Wait-LuilElement -name '닫기' -all_surfaces)
 $null = Wait-LuilElement -id editor-keep -all_surfaces
 checkpoint '편집 종료 확인'

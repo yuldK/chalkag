@@ -58,7 +58,9 @@ namespace chalkag {
         reset_inputs,
         webp_mode,
         webp_quality,
-        compression
+        compression,
+        // 입력 칸의 값을 지금 반영한다 (Enter).
+        apply_inputs
     };
 
     struct animation_editor_intent
@@ -103,6 +105,8 @@ namespace chalkag {
         void cancel() noexcept;
         [[nodiscard]] bool has_unsaved_changes() const;
         [[nodiscard]] bool has_pending_inputs() const;
+        // 반영할 수 없는 입력(범위 밖·빈 칸)이 남아 있다.
+        [[nodiscard]] bool has_invalid_inputs() const;
         [[nodiscard]] bool confirmation_open() const noexcept;
         [[nodiscard]] std::optional<luil::ui_popup> confirmation(float scale) const;
 
@@ -132,6 +136,9 @@ namespace chalkag {
         void cache_image(std::pair<std::size_t, int> key, luil::ui_image image);
         [[nodiscard]] std::optional<capture_region> crop_draft() const;
         [[nodiscard]] std::optional<int> field_value(std::size_t index) const;
+        // 입력 칸을 반영한 편집이다. 받아들일 수 없으면 비우고 이유를 남긴다.
+        [[nodiscard]] std::optional<animation_edit> input_edit(std::u8string& error) const;
+        bool apply_inputs();
 
         bool opened_ {};
         animation_editor_metrics metrics_ { 1040, 760, 1 };
@@ -163,14 +170,21 @@ namespace chalkag {
         std::u8string title_ {}, pending_title_ {}, status_ {};
         std::future<work_result> work_ {};
         std::atomic<bool> cancelled_ {};
-        bool reduction_open_ {}, preserve_duration_ { true }, delay_all_ {}, lock_aspect_ { true }, preview_output_ {};
+        bool reduction_open_ {}, preserve_duration_ { true }, lock_aspect_ { true }, preview_output_ {};
         int stride_ { 2 }, phase_ {};
         float scroll_ {}, sidebar_scroll_ {}, zoom_ { 1 };
         bool playing_ {};
         std::chrono::steady_clock::time_point playback_start_ {};
         std::int64_t playback_offset_ {};
         float crop_start_x_ {}, crop_start_y_ {};
+        // 마지막 입력 시각이다. 잠깐 멈추면 입력을 반영한다.
+        std::optional<std::chrono::steady_clock::time_point> input_at_ {};
     };
+
+    // 편집창이 받은 키를 편집 명령으로 바꾼다. 편집창이 아니거나 해당 키가 없으면 비운다.
+    [[nodiscard]] std::vector<luil::input_action> animation_editor_key_actions(
+        const luil::ui_tree* tree, const luil::key_pressed_event& event
+    );
 
     class animation_editor_policy final : public luil::interaction_policy
     {

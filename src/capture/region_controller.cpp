@@ -798,6 +798,11 @@ namespace chalkag {
             return selecting_ ? std::nullopt : region_;
         }
 
+        [[nodiscard]] bool selecting() const noexcept
+        {
+            return selecting_;
+        }
+
         void cancel_selection()
         {
             finish_selection(false);
@@ -3428,6 +3433,11 @@ namespace chalkag {
     std::optional<capture_region> region_controller::current_region() const
     {
         return impl_->current_region();
+    }
+
+    bool region_controller::selecting() const
+    {
+        return impl_->selecting();
     }
 
     void region_controller::cancel_selection()

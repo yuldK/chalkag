@@ -32,6 +32,12 @@ namespace chalkag {
         luil::appearance_settings appearance { .accent_id = u8"mint" };
         int glow_width { 24 };
         bool auto_save {};
+        // 사진을 저장한 뒤 클립보드에도 넣는다.
+        bool copy_to_clipboard { true };
+        // 사진·녹화를 시작하기 전 기다리는 초다 (0, 3, 5, 10).
+        int capture_delay {};
+        // 명령창 닫기를 종료 대신 알림 영역 숨기기로 쓴다.
+        bool close_to_tray {};
         std::optional<command_window_position> window_position {};
     };
 

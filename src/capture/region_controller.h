@@ -29,6 +29,8 @@ namespace chalkag {
         void begin_selection();
         void cancel_selection();
         [[nodiscard]] std::optional<capture_region> current_region() const;
+        // 드래그로 영역을 고르는 중이다.
+        [[nodiscard]] bool selecting() const;
         void set_region(capture_region region);
         void set_appearance(const luil::appearance_settings& appearance);
         void set_glow_width(int width);

@@ -10,7 +10,7 @@
 namespace chalkag {
     luil::ui_popup make_message_dialog(const message_dialog_state& state, const float scale)
     {
-        constexpr float width { 360 };
+        constexpr float width { 380 };
         constexpr auto kind { luil::application_element_kind(10) };
         const bool confirmation { state.kind != message_dialog_kind::information };
         const auto revision { std::to_string(state.revision) };
@@ -53,44 +53,54 @@ namespace chalkag {
 
         const auto add_button = [&](const char8_t* owner,
                                     const char8_t* text,
-                                    const runtime_command action,
+                                    const luil::input_action action,
                                     const luil::text_button_visual visual,
                                     const bool default_button) {
             const luil::text_button_config config { .text = text, .visual = visual, .default_button = default_button };
             auto button { std::make_unique<luil::text_button_element>(luil::ui_element_id { kind, owner }, config) };
             button->set_action(
                 luil::ui_trigger::left_click,
-                [command, action, exit = state.kind == message_dialog_kind::exit_application](
-                    const luil::ui_action_context&
-                ) -> std::vector<luil::input_action> {
-                    if (exit && action == runtime_command::confirm_dialog)
-                    {
-                        return { luil::ui_command::application_exit };
-                    }
-
-                    return { command(action) };
-                }
+                [action](const luil::ui_action_context&) -> std::vector<luil::input_action> { return { action }; }
             );
-            buttons->add(std::move(button), 96);
+            buttons->add_fit(std::move(button));
         };
 
         if (confirmation)
         {
-            add_button(
-                u8"message-cancel", u8"취소", runtime_command::dismiss_dialog, luil::text_button_visual::normal, true
-            );
+            add_button(u8"message-cancel", u8"취소", dismiss, luil::text_button_visual::normal, true);
         }
 
-        add_button(
-            u8"message-confirm",
-            !confirmation                                              ? u8"확인"
-                : state.kind == message_dialog_kind::exit_application  ? u8"종료"
-                : state.kind == message_dialog_kind::replace_recording ? u8"새 녹화"
-                                                                       : u8"비우기",
-            runtime_command::confirm_dialog,
-            confirmation ? luil::text_button_visual::danger : luil::text_button_visual::accent,
-            !confirmation
-        );
+        // 저장하지 않은 녹화가 있으면 저장하고 끝내는 길을 먼저 둔다.
+        if (state.kind == message_dialog_kind::exit_application)
+        {
+            add_button(
+                u8"message-discard-exit",
+                u8"버리고 종료",
+                luil::ui_command::application_exit,
+                luil::text_button_visual::danger,
+                false
+            );
+            add_button(
+                u8"message-confirm",
+                u8"저장 후 종료",
+                command(runtime_command::save_and_exit),
+                luil::text_button_visual::accent,
+                false
+            );
+        }
+        else
+        {
+            add_button(
+                u8"message-confirm",
+                !confirmation                                              ? u8"확인"
+                    : state.kind == message_dialog_kind::exit_while_saving ? u8"저장 취소 후 종료"
+                    : state.kind == message_dialog_kind::replace_recording ? u8"새 녹화"
+                                                                           : u8"비우기",
+                command(runtime_command::confirm_dialog),
+                confirmation ? luil::text_button_visual::danger : luil::text_button_visual::accent,
+                !confirmation
+            );
+        }
         content->add(std::move(buttons), 32);
 
         const float height { 40 + title_height + 12 + body_height + 24 + 32 };

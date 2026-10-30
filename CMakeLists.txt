@@ -73,6 +73,8 @@ add_executable(chalkag WIN32
     src/app/help_text.cpp
     src/app/help_text.h
     src/app/app_runtime.cpp
+    src/app/clipboard.cpp
+    src/app/clipboard.h
     src/app/settings.cpp
     src/app/single_instance.cpp
     src/app/single_instance.h

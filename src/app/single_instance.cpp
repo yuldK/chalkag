@@ -254,6 +254,11 @@ namespace chalkag {
 
                 SetForegroundWindow(window);
             }
+            else
+            {
+                // 촬영 때문에 숨긴 창인지 알림 영역에 숨긴 창인지는 앱이 안다.
+                PostMessageW(window, single_instance_show_message, 0, 0);
+            }
 
             return 0;
         }

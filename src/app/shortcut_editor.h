@@ -27,13 +27,9 @@ namespace chalkag {
         [[nodiscard]] bool handle(const luil::app_message& message);
         [[nodiscard]] std::optional<hotkey_bindings> bindings() const;
         [[nodiscard]] std::u8string error() const;
-        void add_inputs(
-            const std::function<void(std::unique_ptr<luil::ui_element>)>& add,
-            float width,
-            float top,
-            float scale,
-            bool editable
-        ) const;
+        // 라벨과 입력 칸을 줄마다 짝지은 폼이다. 높이는 `inputs_height`다.
+        [[nodiscard]] std::unique_ptr<luil::ui_element> make_inputs(bool editable) const;
+        [[nodiscard]] static float inputs_height() noexcept;
 
     private:
         std::array<luil::text::text_edit_state, default_hotkeys.size()> fields_ {};
@@ -50,5 +46,8 @@ namespace chalkag {
         ) const override;
         [[nodiscard]] std::optional<luil::menu_kinds> menu() const override;
         [[nodiscard]] std::vector<luil::input_action> close_menu() const override;
+        [[nodiscard]] std::vector<luil::input_action> on_key(
+            const luil::ui_tree* tree, const luil::key_pressed_event& event, const luil::interaction_snapshot& snapshot
+        ) override;
     };
 } // namespace chalkag

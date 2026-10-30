@@ -47,6 +47,9 @@ namespace chalkag {
             return seconds + u8"." + fraction + u8"초";
         }
 
+        // 입력을 멈춘 뒤 반영까지 기다리는 시간이다.
+        constexpr std::chrono::milliseconds input_settle_delay { 900 };
+
         luil::input_action make_editor_action(
             const animation_editor_action command, const double value = 0, const bool alternate = false
         )
@@ -671,8 +674,8 @@ namespace chalkag {
             luil::ui_element_id { editor_kind, u8"editor-confirm-description" },
             luil::label_config {
                 .text = confirm_exit_
-                    ? u8"편집본을 저장하거나 변경을 버리고 종료할 수 있습니다. 적용 전 입력은 먼저 편집창에서 "
-                      u8"적용하세요."
+                    ? u8"편집본을 저장하거나 변경을 버리고 종료할 수 있습니다. 입력 칸의 값은 저장할 때 함께 "
+                      u8"반영됩니다."
                     : u8"다른 원본을 열기 전에 현재 편집을 저장하세요. 변경을 버리면 실행 취소 기록도 사라집니다.",
                 .wrap = true,
                 .max_lines = 3
@@ -761,6 +764,123 @@ namespace chalkag {
         return value;
     }
 
+    std::optional<animation_edit> animation_editor::input_edit(std::u8string& error) const
+    {
+        if (!document_ || edit_.frames.empty())
+        {
+            return std::nullopt;
+        }
+
+        if (composition_)
+        {
+            error = u8"입력을 마친 뒤 반영합니다.";
+            return std::nullopt;
+        }
+
+        auto draft { edit_ };
+
+        // 표시 시간은 선택한 프레임에 함께 넣는다.
+        if (field_value(0) != edit_.frames[current_].milliseconds)
+        {
+            const auto delay { field_value(0) };
+
+            if (!delay || *delay < 1 || *delay > 600000)
+            {
+                error = u8"표시 시간은 1~600,000ms로 입력하세요.";
+                return std::nullopt;
+            }
+
+            for (std::size_t position {}; position < draft.frames.size(); ++position)
+            {
+                if (selected_[position] || position == current_)
+                {
+                    draft.frames[position].milliseconds = *delay;
+                }
+            }
+        }
+
+        const std::array crop_values { edit_.crop.x, edit_.crop.y, edit_.crop.width, edit_.crop.height };
+        bool crop_changed {};
+
+        for (std::size_t index {}; index < crop_values.size(); ++index)
+        {
+            crop_changed = crop_changed || field_value(index + 1) != crop_values[index];
+        }
+
+        if (crop_changed)
+        {
+            const auto crop { crop_draft() };
+
+            if (!crop)
+            {
+                error = u8"크롭 영역 전체가 원본 안에 있어야 합니다.";
+                return std::nullopt;
+            }
+
+            draft.crop = *crop;
+            draft.output_width = crop->width;
+            draft.output_height = crop->height;
+        }
+
+        const bool size_changed { field_value(5) != edit_.output_width || field_value(6) != edit_.output_height };
+
+        if (size_changed)
+        {
+            const auto width { field_value(5) };
+            const auto height { field_value(6) };
+
+            if (!width || !height || *width < 1 || *width > 16383 || *height < 1 || *height > 16383)
+            {
+                error = u8"출력 크기는 한 변 1~16,383px로 입력하세요.";
+                return std::nullopt;
+            }
+
+            const auto output_height {
+                lock_aspect_ ? std::llround(static_cast<double>(*width) * draft.crop.height / draft.crop.width)
+                             : *height
+            };
+
+            if (output_height < 1 || output_height > 16383)
+            {
+                error = u8"출력 크기는 한 변 1~16,383px로 입력하세요.";
+                return std::nullopt;
+            }
+
+            draft.output_width = *width;
+            draft.output_height = static_cast<int>(output_height);
+        }
+
+        return draft;
+    }
+
+    bool animation_editor::apply_inputs()
+    {
+        input_at_.reset();
+
+        if (!has_pending_inputs())
+        {
+            return true;
+        }
+
+        std::u8string error {};
+        auto draft { input_edit(error) };
+
+        if (!draft)
+        {
+            status_ = error;
+            return false;
+        }
+
+        commit(std::move(*draft));
+        return !has_pending_inputs();
+    }
+
+    bool animation_editor::has_invalid_inputs() const
+    {
+        std::u8string error {};
+        return has_pending_inputs() && !input_edit(error);
+    }
+
     void animation_editor::refresh_fields()
     {
         if (edit_.frames.empty())
@@ -779,7 +899,11 @@ namespace chalkag {
 
         for (std::size_t index {}; index < values.size(); ++index)
         {
-            luil::text::text_edit_set_text(fields_[index], number_text(values[index]), true);
+            // 같은 값은 다시 넣지 않아 입력 중인 칸의 커서와 선택을 지킨다.
+            if (const auto text { number_text(values[index]) }; fields_[index].text != text)
+            {
+                luil::text::text_edit_set_text(fields_[index], text, true);
+            }
         }
 
         composition_.reset();
@@ -1032,6 +1156,7 @@ namespace chalkag {
             if (target >= 301 && target <= 307 && !work_.valid())
             {
                 luil::apply_text_edit(fields_[target - 301], edit->request);
+                input_at_ = std::chrono::steady_clock::now();
 
                 if (target == 306 && lock_aspect_ && document_)
                 {
@@ -1180,11 +1305,15 @@ namespace chalkag {
         const auto index { static_cast<std::size_t>(std::clamp(intent->value, 0.0, 1000000.0)) };
         animation_edit draft {};
 
-        if (has_pending_inputs()
-            && (command == animation_editor_action::select || command == animation_editor_action::previous
-                || command == animation_editor_action::next))
+        // 프레임을 옮기거나 다른 편집을 하기 전에 입력 칸의 값을 먼저 반영한다.
+        if (has_pending_inputs() && command != animation_editor_action::apply_inputs
+            && command != animation_editor_action::apply_delay && command != animation_editor_action::apply_crop
+            && command != animation_editor_action::apply_size && command != animation_editor_action::scroll
+            && command != animation_editor_action::sidebar_scroll && command != animation_editor_action::zoom
+            && command != animation_editor_action::preview_output && command != animation_editor_action::reduction_panel
+            && command != animation_editor_action::lock_aspect && !apply_inputs())
         {
-            status_ = u8"입력값을 적용하거나 입력 되돌리기를 누른 뒤 프레임을 이동하세요.";
+            status_ += u8" 값을 고치거나 입력 되돌리기를 누르세요.";
             return true;
         }
 
@@ -1322,43 +1451,24 @@ namespace chalkag {
         }
 
         case animation_editor_action::delay_all:
-            delay_all_ = !delay_all_;
+            // 지금 프레임의 표시 시간을 모든 프레임에 넣는다.
+            draft = edit_;
+
+            for (auto& frame : draft.frames)
+            {
+                frame.milliseconds = edit_.frames[current_].milliseconds;
+            }
+
+            commit(std::move(draft));
             break;
 
         case animation_editor_action::apply_delay:
-            draft = edit_;
-
-            if (const auto delay { field_value(0) }; delay && *delay >= 1 && *delay <= 600000)
-            {
-                for (std::size_t position {}; position < draft.frames.size(); ++position)
-                {
-                    if (delay_all_ || selected_[position])
-                    {
-                        draft.frames[position].milliseconds = *delay;
-                    }
-                }
-
-                commit(std::move(draft));
-            }
-            else
-            {
-                status_ = u8"표시 시간은 1~600,000ms로 입력하세요.";
-            }
-
-            break;
-
         case animation_editor_action::apply_crop:
-            if (auto crop { crop_draft() })
+        case animation_editor_action::apply_size:
+        case animation_editor_action::apply_inputs:
+            if (apply_inputs())
             {
-                draft = edit_;
-                draft.crop = *crop;
-                draft.output_width = crop->width;
-                draft.output_height = crop->height;
-                commit(std::move(draft));
-            }
-            else
-            {
-                status_ = u8"크롭 영역 전체가 원본 안에 있어야 합니다.";
+                status_ = u8"입력을 반영했습니다. 실행 취소로 되돌릴 수 있습니다.";
             }
 
             break;
@@ -1373,35 +1483,6 @@ namespace chalkag {
 
         case animation_editor_action::lock_aspect:
             lock_aspect_ = !lock_aspect_;
-            break;
-
-        case animation_editor_action::apply_size:
-            draft = edit_;
-
-            if (const auto width { field_value(5) }, height { field_value(6) };
-                width && height && *width >= 1 && *width <= 16383 && *height >= 1 && *height <= 16383)
-            {
-                draft.output_width = *width;
-
-                const auto output_height {
-                    lock_aspect_ ? std::llround(static_cast<double>(*width) * draft.crop.height / draft.crop.width)
-                                 : *height
-                };
-
-                if (output_height < 1 || output_height > 16383)
-                {
-                    status_ = u8"출력 크기는 한 변 1~16,383px로 입력하세요.";
-                    break;
-                }
-
-                draft.output_height = static_cast<int>(output_height);
-                commit(std::move(draft));
-            }
-            else
-            {
-                status_ = u8"출력 크기는 한 변 1~16,383px로 입력하세요.";
-            }
-
             break;
 
         case animation_editor_action::format:
@@ -1444,12 +1525,6 @@ namespace chalkag {
                                               : lossless_compression::compact;
             break;
         case animation_editor_action::export_file: {
-            if (has_pending_inputs())
-            {
-                confirming_ = false;
-                status_ = u8"적용 전 입력이 있습니다. 각 도구의 적용 또는 입력 되돌리기를 누르세요.";
-                break;
-            }
             confirming_ = false;
             cancelled_ = false;
             playing_ = false;
@@ -1509,6 +1584,11 @@ namespace chalkag {
 
     std::optional<std::chrono::steady_clock::time_point> animation_editor::next_tick() const
     {
+        if (opened_ && input_at_ && !playing_ && !work_.valid())
+        {
+            return *input_at_ + input_settle_delay;
+        }
+
         if (opened_ && playing_)
         {
             return std::chrono::steady_clock::now() + std::chrono::milliseconds { 16 };
@@ -1524,6 +1604,12 @@ namespace chalkag {
 
     void animation_editor::tick(const std::chrono::steady_clock::time_point now)
     {
+        // 입력을 잠깐 멈추면 반영한다. 받아들일 수 없는 값은 칸에 남기고 이유를 보인다.
+        if (input_at_ && now >= *input_at_ + input_settle_delay && !work_.valid() && !confirming_)
+        {
+            static_cast<void>(apply_inputs());
+        }
+
         if (work_.valid() && work_.wait_for(std::chrono::seconds { 0 }) == std::future_status::ready)
         {
             auto result { work_.get() };
@@ -1704,6 +1790,24 @@ namespace chalkag {
         const float right { width - sidebar - 32 };
         const float main_width { right - 40 };
         const bool available { document_ != nullptr && !work_.valid() };
+        const bool invalid_inputs { has_invalid_inputs() };
+        // 입력 칸이 지금 편집에서 가리키는 값이다.
+        const auto field_target = [&](const std::size_t index) {
+            if (edit_.frames.empty())
+            {
+                return 0;
+            }
+
+            const std::array values { edit_.frames[current_].milliseconds,
+                                      edit_.crop.x,
+                                      edit_.crop.y,
+                                      edit_.crop.width,
+                                      edit_.crop.height,
+                                      edit_.output_width,
+                                      edit_.output_height
+            };
+            return values[index];
+        };
         auto root { std::make_unique<luil::root_element>(u8"animation-editor-content") };
         // 오른쪽 편집 도구는 독립된 스크롤 영역에 조립하고 원본 미리보기와 타임라인을 따로 배치한다.
         auto tools { std::make_unique<editor_tools_element>(right, scale) };
@@ -1758,6 +1862,7 @@ namespace chalkag {
             luil::text_input_config config {};
             config.input.kind = luil::text_input_kind::number;
             config.placeholder = field_names[index];
+            config.invalid = invalid_inputs && field_value(index) != std::optional<int> { field_target(index) };
 
             const luil::ui_element_id id { luil::application_element_kind(static_cast<std::uint32_t>(30 + index)),
                                            field_owners[index]
@@ -1854,15 +1959,29 @@ namespace chalkag {
         label(u8"edit-source", title_, 20, 42, main_width - 210, 16);
         auto state_badge { std::make_unique<luil::badge_element>(
             luil::ui_element_id { editor_kind, u8"edit-dirty" },
-            luil::badge_config { .text = has_pending_inputs() ? u8"입력 적용 필요"
-                                     : has_unsaved_changes()  ? u8"저장 전 변경"
-                                                              : u8"변경 없음",
-                                 .tone = has_unsaved_changes() ? luil::badge_tone::warning : luil::badge_tone::neutral
+            luil::badge_config { .text = invalid_inputs      ? u8"입력 확인 필요"
+                                     : has_unsaved_changes() ? u8"저장 전 변경"
+                                                             : u8"변경 없음",
+                                 .tone = invalid_inputs || has_unsaved_changes() ? luil::badge_tone::warning
+                                                                                 : luil::badge_tone::neutral
             }
         )
         };
-        state_badge->arrange({ { (main_width - 142) * scale, 44 * scale, 160 * scale, 24 * scale }, scale });
+        state_badge->arrange({ { (main_width - 142) * scale, 44 * scale, 140 * scale, 24 * scale }, scale });
         root->add(std::move(state_badge));
+        // 저장 형식은 저장 버튼 바로 옆에서 고른다.
+        choice(
+            u8"edit-format",
+            u8"편집 결과 저장 형식",
+            { { u8"0", u8"WebP" }, { u8"1", u8"APNG" }, { u8"2", u8"GIF" } },
+            options_.animation_format == image_format::apng      ? u8"1"
+                : options_.animation_format == image_format::gif ? u8"2"
+                                                                 : u8"0",
+            animation_editor_action::format,
+            width - 474,
+            41,
+            196
+        );
         button(
             u8"edit-open",
             u8"이미지 열기",
@@ -1880,7 +1999,7 @@ namespace chalkag {
             u8"편집본 저장",
             { width - 144, 40, 128, 32 },
             button_action(animation_editor_action::export_file),
-            available && !has_pending_inputs(),
+            available && !invalid_inputs,
             luil::text_button_visual::accent
         );
         button(
@@ -2117,24 +2236,16 @@ namespace chalkag {
             );
         }
 
-        label(u8"edit-delay-label", u8"프레임 간격", right, 120, sidebar, 14);
-        input(0, right, 150, 96);
+        label(u8"edit-delay-label", u8"표시 시간 · 선택한 프레임 (ms)", right, 120, sidebar, 14);
+        input(0, right, 150, 120);
         button(
-            u8"edit-apply-delay",
-            u8"간격 적용",
-            { right + 104, 150, sidebar - 104, 30 },
-            button_action(animation_editor_action::apply_delay),
-            available
-        );
-        check(
             u8"edit-delay-all",
-            u8"전체 프레임에 적용",
-            delay_all_,
-            animation_editor_action::delay_all,
-            right,
-            186,
-            sidebar
+            u8"모든 프레임에 같게",
+            { right + 128, 150, sidebar - 128, 30 },
+            button_action(animation_editor_action::delay_all),
+            available && !invalid_inputs
         );
+        label(u8"edit-input-note", u8"입력하면 바로 반영 · Enter로 즉시 반영", right, 186, sidebar, 11);
         button(
             u8"edit-reduction",
             reduction_open_ ? u8"프레임 수 줄이기  ▴" : u8"프레임 수 줄이기  ▾",
@@ -2226,16 +2337,9 @@ namespace chalkag {
         input(4, right + 144, y, 144);
         y += 38;
         button(
-            u8"edit-apply-crop",
-            u8"크롭 적용",
-            { right, y, 136, 30 },
-            button_action(animation_editor_action::apply_crop),
-            available
-        );
-        button(
             u8"edit-reset-crop",
-            u8"원본 영역",
-            { right + 144, y, 144, 30 },
+            u8"크롭 해제 · 원본 전체",
+            { right, y, sidebar, 30 },
             button_action(animation_editor_action::reset_crop),
             available
         );
@@ -2252,30 +2356,10 @@ namespace chalkag {
             animation_editor_action::lock_aspect,
             right,
             y,
-            196
-        );
-        button(
-            u8"edit-apply-size",
-            u8"적용",
-            { right + 204, y, 84, 28 },
-            button_action(animation_editor_action::apply_size),
-            available
-        );
-        y += 38;
-        choice(
-            u8"edit-format",
-            u8"편집 결과 저장 형식",
-            { { u8"0", u8"WebP" }, { u8"1", u8"APNG" }, { u8"2", u8"GIF" } },
-            options_.animation_format == image_format::apng      ? u8"1"
-                : options_.animation_format == image_format::gif ? u8"2"
-                                                                 : u8"0",
-            animation_editor_action::format,
-            right,
-            y,
             sidebar
         );
-        y += 34;
-        label(u8"edit-export-settings", u8"WebP 품질 · 압축 속도", right, y, sidebar, 14);
+        y += 44;
+        label(u8"edit-export-settings", u8"저장 설정 · WebP 품질과 압축 속도", right, y, sidebar, 14);
         y += 30;
         choice(
             u8"edit-webp-mode",
@@ -2333,7 +2417,7 @@ namespace chalkag {
         if (options_.animation_format == image_format::gif)
         {
             y += 22;
-            label(u8"edit-gif-timing", u8"간격은 10ms 단위 · 최소 20ms로 저장", right, y, sidebar, 11);
+            label(u8"edit-gif-timing", u8"표시 시간은 10ms 단위 · 최소 20ms로 저장", right, y, sidebar, 11);
         }
 
         luil::scroll_area_config tools_config {};
@@ -2359,7 +2443,7 @@ namespace chalkag {
         root->add(std::move(area));
         label(u8"edit-status", status_, 20, height - 28, width - 120, 11);
 
-        if (has_pending_inputs())
+        if (invalid_inputs)
         {
             button(
                 u8"edit-reset-inputs",
@@ -2412,6 +2496,55 @@ namespace chalkag {
         root->arrange({ { 0, 0, width * scale, height * scale }, scale });
         window.tree = std::make_shared<const luil::ui_tree>(std::move(root));
         return window;
+    }
+
+    std::vector<luil::input_action> animation_editor_key_actions(
+        const luil::ui_tree* tree, const luil::key_pressed_event& event
+    )
+    {
+        // 편집창의 tree에서 온 키만 편집 명령으로 바꾼다. 입력 칸이 먼저 소비한 키는 여기 오지 않는다.
+        if (tree == nullptr || tree->find({ editor_kind, u8"edit-source" }) == nullptr || event.alt)
+        {
+            return {};
+        }
+
+        using action = animation_editor_action;
+        const auto send = [](const action command, const double value = 0) {
+            return std::vector<luil::input_action> { make_editor_action(command, value) };
+        };
+
+        if (event.control)
+        {
+            switch (event.key)
+            {
+            case luil::key_code::key_z:
+                return send(event.shift ? action::redo : action::undo);
+            case luil::key_code::key_y:
+                return send(action::redo);
+            case luil::key_code::key_a:
+                return send(action::select_all);
+            case luil::key_code::key_s:
+                return event.repeat ? std::vector<luil::input_action> {} : send(action::export_file);
+            default:
+                return {};
+            }
+        }
+
+        switch (event.key)
+        {
+        case luil::key_code::enter:
+            return send(action::apply_inputs);
+        case luil::key_code::space:
+            return event.repeat ? std::vector<luil::input_action> {} : send(action::play);
+        case luil::key_code::delete_forward:
+            return event.repeat ? std::vector<luil::input_action> {} : send(action::erase);
+        case luil::key_code::arrow_left:
+            return send(action::previous);
+        case luil::key_code::arrow_right:
+            return send(action::next);
+        default:
+            return {};
+        }
     }
 
     std::optional<luil::text_input_target> animation_editor_policy::text_target_of(

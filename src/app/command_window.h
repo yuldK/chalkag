@@ -15,7 +15,7 @@
 namespace chalkag {
     class single_instance;
     inline constexpr int command_window_width { 480 };
-    inline constexpr int command_window_height { 176 };
+    inline constexpr int command_window_height { 152 };
 
     enum class options_page
     {

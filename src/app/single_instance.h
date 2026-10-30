@@ -6,6 +6,9 @@
 #include <string_view>
 
 namespace chalkag {
+    // 다시 실행했는데 창이 보이지 않으면(알림 영역에 숨김) 이 메시지로 앱에 보이기를 맡긴다.
+    inline constexpr UINT single_instance_show_message { WM_APP + 2 };
+
     // 실제 앱의 진입점에서만 사용한다. 테스트·UI 미리보기에는 제한을 적용하지 않는다.
     class single_instance final
     {

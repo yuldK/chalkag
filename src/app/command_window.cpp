@@ -11,6 +11,7 @@
 #include "luil/ui/choice_group_element.h"
 #include "luil/ui/dialog_elements.h"
 #include "luil/ui/dropdown_element.h"
+#include "luil/ui/glyph_element.h"
 #include "luil/ui/label_element.h"
 #include "luil/ui/list_element.h"
 #include "luil/ui/menu_element.h"
@@ -19,9 +20,9 @@
 #include "luil/ui/root_element.h"
 #include "luil/ui/scroll_area_element.h"
 #include "luil/ui/slider_element.h"
+#include "luil/ui/stack_element.h"
 #include "luil/ui/tab_bar_element.h"
 #include "luil/ui/theme_picker_element.h"
-#include "luil/ui/toast_element.h"
 #include "luil/ui/ui_tree.h"
 
 #include <algorithm>
@@ -102,51 +103,6 @@ namespace chalkag {
             luil::slider_element slider_;
         };
 
-        class options_content_element final : public luil::ui_element
-        {
-        public:
-            explicit options_content_element(const float scale)
-                : ui_element { { command_kind, u8"options-content" } }
-                , scale_ { scale }
-            {}
-
-            void add(std::unique_ptr<luil::ui_element> element)
-            {
-                const auto box { element->bounds() };
-                slots_.push_back({ box.x / scale_, box.y / scale_ - 196.0f, box.width / scale_, box.height / scale_ });
-                add_child(std::move(element));
-            }
-
-            void arrange(const luil::arrange_context& context) override
-            {
-                set_bounds(context.slot);
-
-                const auto elements { children() };
-
-                for (std::size_t index {}; index < elements.size(); ++index)
-                {
-                    const auto slot { slots_[index] };
-                    elements[index]->arrange(context.for_child(
-                        { context.slot.x + slot.x * context.scale,
-                          context.slot.y + slot.y * context.scale,
-                          slot.width * context.scale,
-                          slot.height * context.scale
-                        }
-                    ));
-                }
-            }
-
-            void draw(luil::draw_context& context, const luil::interaction_snapshot& interaction) const override
-            {
-                draw_children(context, interaction);
-            }
-
-        private:
-            float scale_ { 1.0f };
-
-            std::vector<luil::rect_f> slots_ {};
-        };
-
         [[nodiscard]] std::shared_ptr<const luil::ui_style> command_style(const bool recording)
         {
             static const auto style = [] {
@@ -173,15 +129,6 @@ namespace chalkag {
             }();
             return recording ? recording_style : style;
         }
-
-        struct command_description
-        {
-            runtime_command command;
-
-            const char8_t* owner;
-            const char8_t* name;
-            char32_t glyph;
-        };
 
         std::u8string_view option_button_help(const runtime_command action)
         {
@@ -509,6 +456,10 @@ namespace chalkag {
         {
             caption_config.title = u8"chalkag · 저장 중";
         }
+        else if (runtime_state_.countdown > 0)
+        {
+            caption_config.title = u8"chalkag · " + runtime_state_.countdown_label;
+        }
 
         const float caption_height { luil::caption_element::height_for(caption_config) * scale };
 
@@ -542,304 +493,264 @@ namespace chalkag {
             root->add(std::move(panel));
         }
 
-        const std::array commands {
-            command_description { runtime_command::select_region,
-                                  u8"select-region",
-                                  u8"캡쳐 영역 선택",
-                                  luil::codicons::icon_screen_full
-            },
-            command_description { runtime_command::take_screenshot,
-                                  u8"take-screenshot",
-                                  u8"스크린샷 찍기",
-                                  luil::codicons::icon_device_camera
-            },
-            command_description { runtime_command::toggle_recording,
-                                  u8"toggle-recording",
-                                  u8"애니메이션 녹화 / 정지",
-                                  luil::codicons::icon_record
-            },
-            command_description { runtime_command::new_recording, u8"toolbar-discard-recording", u8"새 녹화", 0 },
-            command_description { runtime_command::toggle_options,
-                                  u8"open-options",
-                                  u8"옵션 / 영역 프리셋",
-                                  luil::codicons::icon_settings_gear
-            },
-            command_description {
-                runtime_command::toggle_always_on_top, u8"toggle-topmost", u8"항상 위", luil::codicons::icon_pin
-            },
+        const bool dialog_open { runtime_state_.dialog.kind != message_dialog_kind::none };
+        const bool counting { runtime_state_.countdown > 0 };
+
+        // 버튼·링크에 공통으로 붙이는 명령과 손가락 커서다.
+        const auto command_action = [](const runtime_command action, std::u8string argument = {}) {
+            return [action, argument](const luil::ui_action_context&) -> std::vector<luil::input_action> {
+                return { luil::app_ui_command { static_cast<std::uint32_t>(action), argument } };
+            };
         };
-        float left { toolbar_padding * scale };
 
-        for (const command_description& command : commands)
-        {
-            if (command.command == runtime_command::new_recording
-                && (!runtime_state_.pending_recording || runtime_state_.recording))
-            {
-                continue;
-            }
-
-            if (runtime_state_.busy && command.command != runtime_command::toggle_always_on_top)
-            {
-                continue;
-            }
-
-            luil::button_config button_config {};
-
-            button_config.glyph = command.glyph;
-
-            if (command.command == runtime_command::toggle_recording && runtime_state_.recording)
-            {
-                button_config.glyph = luil::codicons::icon_debug_stop;
-            }
-
-            if (command.command == runtime_command::toggle_always_on_top && runtime_state_.settings.always_on_top)
-            {
-                button_config.glyph = luil::codicons::icon_pinned;
-            }
-
-            button_config.icon_size = 16.0f;
-            button_config.corner_radius = 6.0f;
-            button_config.active = (command.command == runtime_command::select_region
-                                    && (region_state_.selecting || region_state_.region.has_value()))
-                || (command.command == runtime_command::toggle_recording && runtime_state_.recording)
-                || (command.command == runtime_command::toggle_options && runtime_state_.options_open)
-                || (command.command == runtime_command::toggle_always_on_top && runtime_state_.settings.always_on_top);
-
-            std::unique_ptr<luil::ui_element> button {};
-
-            if (command.command == runtime_command::toggle_recording)
-            {
-                luil::text_button_config record_config {};
-
-                record_config.text = runtime_state_.recording ? u8"정지"
-                    : runtime_state_.pending_recording ? (runtime_state_.recording_saved ? u8"다시 저장" : u8"저장")
-                                                       : u8"녹화";
-
-                record_config.glyph
-                    = runtime_state_.pending_recording ? luil::codicons::icon_save : button_config.glyph;
-
-                record_config.visual
-                    = runtime_state_.recording ? luil::text_button_visual::danger : luil::text_button_visual::accent;
-                button = std::make_unique<luil::text_button_element>(
-                    luil::ui_element_id { command_kind, command.owner }, std::move(record_config)
-                );
-            }
-            else if (command.command == runtime_command::new_recording)
-            {
-                button = std::make_unique<luil::text_button_element>(
-                    luil::ui_element_id { command_kind, command.owner },
-                    luil::text_button_config { .text = u8"새 녹화", .visual = luil::text_button_visual::normal }
-                );
-            }
-            else if (
-                command.command == runtime_command::select_region || command.command == runtime_command::take_screenshot
+        const auto make_text_button = [&](const char8_t* owner,
+                                          const std::u8string& text,
+                                          const runtime_command action,
+                                          const bool enabled,
+                                          const luil::text_button_visual visual = luil::text_button_visual::normal,
+                                          const char32_t glyph = 0) {
+            auto element { std::make_unique<luil::text_button_element>(
+                luil::ui_element_id { command_kind, owner },
+                luil::text_button_config { .text = text, .visual = visual, .glyph = glyph }
             )
-            {
-                button = std::make_unique<luil::text_button_element>(
-                    luil::ui_element_id { command_kind, command.owner },
-                    luil::text_button_config {
-                        .text = command.command == runtime_command::select_region ? u8"영역 선택" : u8"사진",
-                        .visual = command.command == runtime_command::select_region && !region_state_.region
-                            ? luil::text_button_visual::accent
-                            : luil::text_button_visual::normal,
-                        .glyph = command.glyph
-                    }
-                );
-            }
-            else
-            {
-                button = std::make_unique<luil::button_element>(
-                    luil::ui_element_id { command_kind, command.owner }, button_config
-                );
-            }
-
-            button->set_access_name(command.name);
-
-            if (command.command == runtime_command::toggle_always_on_top)
-            {
-                button->set_access_name(
-                    runtime_state_.settings.always_on_top ? u8"항상 위 · 고정됨" : u8"항상 위 · 고정 해제됨"
-                );
-            }
-
-            if (command.command == runtime_command::toggle_recording)
-            {
-                button->set_access_name(
-                    runtime_state_.recording               ? u8"녹화 정지"
-                        : runtime_state_.pending_recording ? u8"보관 녹화 저장"
-                                                           : u8"애니메이션 녹화 시작"
-                );
-            }
-
-            const auto action
-                = [id = command.command == runtime_command::toggle_recording && runtime_state_.pending_recording
-                       ? runtime_command::save_recording
-                       : command.command](const luil::ui_action_context&) -> std::vector<luil::input_action> {
-                return { luil::app_ui_command { .command = static_cast<std::uint32_t>(id) } };
             };
-            button->set_action(luil::ui_trigger::left_click, action);
-            button->set_cursor(luil::ui_cursor::hand);
+            element->set_access_name(text);
+            element->set_action(luil::ui_trigger::left_click, command_action(action));
+            element->set_enabled(enabled && !dialog_open);
+            element->set_cursor(element->enabled() ? luil::ui_cursor::hand : luil::ui_cursor::arrow);
+            return element;
+        };
 
-            if (command.command == runtime_command::select_region)
-            {
-                button->set_enabled(!runtime_state_.busy && !runtime_state_.recording);
-            }
-            else if (command.command == runtime_command::toggle_always_on_top)
-            {
-                button->set_enabled(runtime_state_.settings_writable);
-            }
-            else if (command.command == runtime_command::new_recording)
-            {
-                button->set_enabled(
-                    !runtime_state_.busy && !runtime_state_.recording && runtime_state_.pending_recording
-                );
-            }
-            else
-            {
-                const bool idle { !runtime_state_.busy && !region_state_.selecting
-                                  && region_state_.region.has_value()
-                };
+        const auto make_label = [&](const char8_t* owner,
+                                    const std::u8string& text,
+                                    const float size = 12.0f,
+                                    const luil::label_color_role color = luil::label_color_role::primary) {
+            help.emplace(owner, help_content { .title = u8"캡쳐 안내", .body = text });
+            auto element { std::make_unique<luil::label_element>(
+                luil::ui_element_id { command_kind, owner },
+                luil::label_config { .text = text, .font_size = size, .color = color }
+            )
+            };
+            element->set_cursor(luil::ui_cursor::arrow);
+            return element;
+        };
 
-                const bool can_shoot { command.command != runtime_command::take_screenshot
-                                       || !runtime_state_.recording
-                };
+        // 폭에 맞춰 줄을 바꾼 안내와 그 높이다. 높이는 담는 쪽이 세어 stack에 넘긴다.
+        const auto make_note = [&](const char8_t* owner,
+                                   const std::u8string& text,
+                                   const float text_width,
+                                   const float size = 11.0f,
+                                   const std::size_t max_lines = 3,
+                                   const luil::label_color_role color = luil::label_color_role::dim) {
+            help.emplace(owner, help_content { .title = u8"캡쳐 안내", .body = text });
+            auto element { std::make_unique<wrapped_help_element>(
+                luil::ui_element_id { command_kind, owner },
+                layout_help_text(text, text_width, size, max_lines),
+                size,
+                color,
+                text
+            )
+            };
+            element->set_cursor(luil::ui_cursor::arrow);
+            const float note_height { text.empty() ? 0.0f : element->height() };
+            return std::pair { std::move(element), note_height };
+        };
 
-                const bool can_record { true };
-                const bool available { command.command == runtime_command::toggle_options
-                                       || (idle && can_shoot && can_record)
-                };
-                button->set_enabled(available);
-            }
+        const auto row_config = [](const float spacing = 8.0f) {
+            return luil::stack_config { .direction = luil::stack_direction::row, .spacing = spacing };
+        };
 
-            if (runtime_state_.dialog.kind != message_dialog_kind::none)
+        // 누를 수 없는 명령은 안내 맨 앞에 지금 막힌 이유를 적는다.
+        const auto explain_disabled = [&](const luil::ui_element& element, const char8_t* owner) {
+            if (element.enabled())
             {
-                button->set_enabled(false);
-            }
-
-            help_content content { .title = button->accessibility().name };
-            if (command.command == runtime_command::select_region
-                || command.command == runtime_command::take_screenshot)
-            {
-                content.title = command.name;
-            }
-
-            if (command.command == runtime_command::select_region)
-            {
-                content.shortcut = format_hotkey(runtime_state_.settings.shortcuts[0]);
-                content.body = u8"화면을 드래그하여 캡쳐 영역을 선택합니다.\n모서리로 크기를 조절하고 상단 핸들로 "
-                               u8"이동합니다. Esc로 선택을 취소합니다.";
-
-                if (!region_state_.status.empty())
-                {
-                    content.body += u8"\n\n" + region_state_.status;
-                }
-            }
-            else if (command.command == runtime_command::take_screenshot)
-            {
-                content.shortcut = format_hotkey(runtime_state_.settings.shortcuts[1]);
-                content.body = u8"선택한 영역을 "
-                    + std::u8string { runtime_state_.settings.capture.still_format == image_format::png ? u8"PNG"
-                                                                                                        : u8"WebP"
-                    }
-                    + u8" 이미지로 저장합니다.\n저장 위치: 실행 파일 옆 data/captures";
-            }
-            else if (command.command == runtime_command::toggle_recording)
-            {
-                content.shortcut = runtime_state_.pending_recording
-                    ? std::u8string {}
-                    : format_hotkey(runtime_state_.settings.shortcuts[2]);
-
-                if (!runtime_state_.pending_recording && !content.shortcut.empty())
-                {
-                    content.shortcut += u8" · 다시 누르면 정지";
-                }
-
-                content.body = runtime_state_.pending_recording
-                    ? u8"보관한 녹화를 현재 옵션으로 저장합니다.\n저장 탭에서 품질을 조절하고 여러 번 저장할 수 "
-                      u8"있습니다. 새 촬영을 시작하려면 녹화 비우기를 누르세요."
-                    : u8"선택한 영역을 애니메이션 이미지로 녹화합니다.\n정지 후 원본을 보관합니다. 저장 버튼을 누르면 "
-                      u8"현재 옵션으로 저장합니다.";
-            }
-            else if (command.command == runtime_command::new_recording)
-            {
-                content.body
-                    = u8"새 녹화를 시작합니다. 저장한 원본은 바로 교체하고, 미저장 원본은 교체 전에 확인합니다.";
-            }
-            else if (command.command == runtime_command::toggle_always_on_top)
-            {
-                content.body = u8"명령창을 다른 창보다 위에 표시합니다. 다시 누르면 해제합니다.\n재실행해도 설정이 "
-                               u8"유지됩니다. 캡쳐 프레임은 항상 위에 표시됩니다.";
-            }
-            else
-            {
-                content.body = u8"이미지 형식, FPS, 출력 크기, 커서를 설정하고 영역 프리셋을 관리합니다.\n설정은 변경 "
-                               u8"즉시 실행 파일 옆 data 폴더에 저장됩니다.";
+                return;
             }
 
-            if (!button->enabled())
-            {
-                button->set_cursor(luil::ui_cursor::arrow);
+            const auto reason { dialog_open                    ? u8"열린 안내를 닫은 뒤 사용할 수 있습니다."
+                                    : runtime_state_.busy      ? u8"저장이 끝나면 사용할 수 있습니다."
+                                    : runtime_state_.recording ? u8"녹화를 정지한 뒤 사용할 수 있습니다."
+                                    : counting ? u8"지연 촬영을 기다리는 중입니다. 취소 버튼으로 멈출 수 있습니다."
+                                    : region_state_.selecting ? u8"영역 선택을 완료하거나 Esc로 취소하세요."
+                                                              : u8"현재 상태에서는 이 명령을 사용할 수 없습니다."
+            };
+            auto& content { help[owner] };
+            content.body = std::u8string { reason } + u8"\n\n" + content.body;
+        };
 
-                const auto reason
-                    = command.command == runtime_command::toggle_always_on_top && !runtime_state_.settings_writable
-                    ? u8"기존 설정 파일을 읽을 수 없어 변경을 중단했습니다. data/settings.json을 확인하세요."
-                    : runtime_state_.busy               ? u8"저장이 끝나면 사용할 수 있습니다."
-                    : runtime_state_.recording          ? u8"녹화를 정지한 뒤 사용할 수 있습니다."
-                    : region_state_.selecting           ? u8"영역 선택을 완료하거나 Esc로 취소하세요."
-                    : !region_state_.region.has_value() ? u8"먼저 캡쳐 영역을 선택하세요."
-                                                        : u8"현재 상태에서는 이 명령을 사용할 수 없습니다.";
-                content.body = std::u8string { reason } + u8"\n\n" + content.body;
-            }
-
-            help.emplace(command.owner, std::move(content));
-
-            const float button_width { command.command == runtime_command::toggle_recording      ? 94.0f
-                                           : command.command == runtime_command::new_recording   ? 88.0f
-                                           : command.command == runtime_command::select_region   ? 100.0f
-                                           : command.command == runtime_command::take_screenshot ? 70.0f
-                                                                                                 : 36.0f
+        // 첫 줄은 영역 선택·사진·녹화(정지)·저장과 옵션이다.
+        if (!runtime_state_.busy)
+        {
+            auto toolbar { std::make_unique<luil::stack_element>(
+                luil::ui_element_id { command_kind, u8"toolbar" }, row_config(toolbar_spacing)
+            )
             };
 
-            if (command.command == runtime_command::toggle_always_on_top)
+            auto select { make_text_button(
+                u8"select-region",
+                u8"영역 선택",
+                runtime_command::select_region,
+                !runtime_state_.recording && !counting,
+                region_state_.region ? luil::text_button_visual::normal : luil::text_button_visual::accent,
+                luil::codicons::icon_screen_full
+            )
+            };
+            select->set_access_name(u8"캡쳐 영역 선택");
+            help_content select_help { .title = u8"캡쳐 영역 선택",
+                                       .shortcut = format_hotkey(runtime_state_.settings.shortcuts[0]),
+                                       .body = u8"화면을 드래그하여 캡쳐 영역을 선택합니다.\n모서리로 크기를 조절하고 "
+                                               u8"상단 핸들로 이동합니다. Esc로 선택을 취소합니다."
+            };
+            if (!region_state_.status.empty())
             {
-                button->arrange({ { width - 60.0f * scale, 0, 28.0f * scale, caption_height }, scale });
+                select_help.body += u8"\n\n" + region_state_.status;
             }
-            else if (command.command == runtime_command::toggle_options)
+            help.emplace(u8"select-region", std::move(select_help));
+            explain_disabled(*select, u8"select-region");
+            toolbar->add_fit(std::move(select));
+
+            const bool can_shoot { !runtime_state_.recording && !region_state_.selecting && !counting };
+            auto shot { make_text_button(
+                u8"take-screenshot",
+                u8"사진",
+                runtime_command::take_screenshot,
+                can_shoot,
+                luil::text_button_visual::normal,
+                luil::codicons::icon_device_camera
+            )
+            };
+            shot->set_access_name(u8"스크린샷 찍기");
+            help.emplace(
+                u8"take-screenshot",
+                help_content { .title = u8"스크린샷 찍기",
+                               .shortcut = format_hotkey(runtime_state_.settings.shortcuts[1]),
+                               .body = u8"선택한 영역을 "
+                                   + std::u8string { runtime_state_.settings.capture.still_format == image_format::png
+                                                         ? u8"PNG"
+                                                         : u8"WebP"
+                                   }
+                                   + u8" 이미지로 저장합니다. 영역이 없으면 먼저 영역을 고른 뒤 바로 촬영합니다.\n"
+                                     u8"저장 위치: 실행 파일 옆 data/captures"
+                }
+            );
+            explain_disabled(*shot, u8"take-screenshot");
+            toolbar->add_fit(std::move(shot));
+
+            // 녹화 버튼은 녹화와 정지만 맡는다. 보관 원본이 있으면 새 녹화로 시작한다.
+            const bool recording { runtime_state_.recording };
+            auto record { make_text_button(
+                u8"toggle-recording",
+                recording ? u8"정지" : u8"녹화",
+                recording                              ? runtime_command::toggle_recording
+                    : runtime_state_.pending_recording ? runtime_command::new_recording
+                                                       : runtime_command::toggle_recording,
+                (recording || (!region_state_.selecting && !counting)),
+                recording ? luil::text_button_visual::danger : luil::text_button_visual::normal,
+                recording ? luil::codicons::icon_debug_stop : luil::codicons::icon_record
+            )
+            };
+            record->set_access_name(
+                recording                              ? u8"녹화 정지"
+                    : runtime_state_.pending_recording ? u8"새 녹화 시작"
+                                                       : u8"애니메이션 녹화 시작"
+            );
+            help.emplace(
+                u8"toggle-recording",
+                help_content {
+                    .title = record->accessibility().name,
+                    .shortcut = format_hotkey(runtime_state_.settings.shortcuts[2])
+                        + (recording ? std::u8string {} : std::u8string { u8" · 다시 누르면 정지" }),
+                    .body = recording ? u8"녹화를 정지하고 원본을 보관합니다. 저장 버튼으로 파일을 만듭니다."
+                        : runtime_state_.pending_recording
+                        ? u8"보관한 녹화를 비우고 새로 녹화합니다. 아직 저장하지 않았다면 먼저 확인합니다."
+                        : u8"선택한 영역을 애니메이션 이미지로 녹화합니다. 영역이 없으면 먼저 영역을 고른 뒤 바로 "
+                          u8"시작합니다.\n정지 후 원본을 보관하고 저장 버튼으로 파일을 만듭니다."
+                }
+            );
+            explain_disabled(*record, u8"toggle-recording");
+            toolbar->add_fit(std::move(record));
+
+            if (runtime_state_.pending_recording && !recording)
             {
-                button->arrange(
-                    { { width - 44.0f * scale,
-                        caption_height + toolbar_padding * scale,
-                        36.0f * scale,
-                        toolbar_button_height * scale
-                    },
-                      scale
+                auto save { make_text_button(
+                    u8"toolbar-save-recording",
+                    runtime_state_.recording_saved ? u8"다시 저장" : u8"저장",
+                    runtime_command::save_recording,
+                    !counting && !region_state_.selecting,
+                    runtime_state_.recording_saved ? luil::text_button_visual::normal
+                                                   : luil::text_button_visual::accent,
+                    luil::codicons::icon_save
+                )
+                };
+                save->set_access_name(u8"보관 녹화 저장");
+                help.emplace(
+                    u8"toolbar-save-recording",
+                    help_content { .title = u8"보관 녹화 저장",
+                                   .body
+                                   = u8"보관한 녹화를 내보내기 탭의 형식·크기·품질로 저장합니다. 원본은 저장 후에도 "
+                                     u8"남아 다른 설정으로 다시 저장할 수 있습니다."
                     }
                 );
-            }
-            else
-            {
-                button->arrange(
-                    { { left,
-                        caption_height + toolbar_padding * scale,
-                        button_width * scale,
-                        toolbar_button_height * scale
-                    },
-                      scale
-                    }
-                );
+                toolbar->add_fit(std::move(save));
             }
 
-            root->add(std::move(button));
-            left += (button_width + toolbar_spacing) * scale;
+            if (counting)
+            {
+                auto cancel { make_text_button(
+                    u8"cancel-countdown",
+                    u8"취소",
+                    runtime_command::cancel_countdown,
+                    true,
+                    luil::text_button_visual::danger
+                )
+                };
+                cancel->set_access_name(u8"지연 촬영 취소");
+                help.emplace(
+                    u8"cancel-countdown",
+                    help_content { .title = u8"지연 촬영 취소", .body = u8"기다리는 촬영을 시작하지 않습니다." }
+                );
+                toolbar->add_fit(std::move(cancel));
+            }
+
+            toolbar->add_flexible_gap();
+
+            luil::button_config options_config {};
+            options_config.glyph = luil::codicons::icon_settings_gear;
+            options_config.icon_size = 16.0f;
+            options_config.corner_radius = 6.0f;
+            options_config.active = runtime_state_.options_open;
+            auto options { std::make_unique<luil::button_element>(
+                luil::ui_element_id { command_kind, u8"open-options" }, options_config
+            )
+            };
+            options->set_access_name(u8"옵션 / 영역 프리셋");
+            options->set_action(luil::ui_trigger::left_click, command_action(runtime_command::toggle_options));
+            options->set_cursor(luil::ui_cursor::hand);
+            options->set_enabled(!dialog_open);
+            help.emplace(
+                u8"open-options",
+                help_content { .title = u8"옵션 / 영역 프리셋",
+                               .body
+                               = u8"형식·FPS·출력 크기·단축키를 설정하고 영역 프리셋을 관리합니다.\n바꾼 설정은 실행 "
+                                 u8"파일 옆 data 폴더에 바로 저장됩니다."
+                }
+            );
+            toolbar->add(std::move(options), toolbar_button_height);
+            toolbar->arrange(
+                { { toolbar_padding * scale,
+                    caption_height + toolbar_padding * scale,
+                    width - toolbar_padding * 2.0f * scale,
+                    toolbar_button_height * scale
+                },
+                  scale
+                }
+            );
+            root->add(std::move(toolbar));
         }
-
-        if (runtime_state_.busy)
+        else
         {
             const auto text { save_progress_text(runtime_state_.progress) };
-            auto label = std::make_unique<luil::label_element>(
-                luil::ui_element_id { command_kind, u8"save-progress-label" },
-                luil::label_config { .text = text, .font_size = 12, .color = luil::label_color_role::primary }
-            );
+            auto label { make_label(u8"save-progress-label", text) };
             label->arrange(
                 { { toolbar_padding * scale,
                     caption_height + 4.0f * scale,
@@ -871,10 +782,10 @@ namespace chalkag {
             }
             else
             {
-                auto detail = std::make_unique<luil::label_element>(
-                    luil::ui_element_id { command_kind, u8"save-progress-detail" },
-                    luil::label_config { .text = u8"완료되면 명령 버튼으로 돌아갑니다", .font_size = 10 }
-                );
+                auto detail { make_label(
+                    u8"save-progress-detail", u8"완료되면 명령 버튼으로 돌아갑니다", 10.0f, luil::label_color_role::dim
+                )
+                };
                 detail->arrange(
                     { { toolbar_padding * scale,
                         caption_height + 28.0f * scale,
@@ -888,325 +799,252 @@ namespace chalkag {
             }
         }
 
-        const auto quick_button = [&](const char8_t* owner,
-                                      const char8_t* text,
-                                      const runtime_command action,
-                                      const float x,
-                                      const float y,
-                                      const float button_width,
-                                      const bool enabled) {
-            auto element { std::make_unique<luil::text_button_element>(
-                luil::ui_element_id { command_kind, owner },
-                luil::text_button_config { .text = text, .visual = luil::text_button_visual::link }
+        // 항상 위 핀은 제목줄에 둔다.
+        {
+            luil::button_config pin_config {};
+            pin_config.glyph
+                = runtime_state_.settings.always_on_top ? luil::codicons::icon_pinned : luil::codicons::icon_pin;
+            pin_config.icon_size = 16.0f;
+            pin_config.corner_radius = 6.0f;
+            pin_config.active = runtime_state_.settings.always_on_top;
+            auto pin { std::make_unique<luil::button_element>(
+                luil::ui_element_id { command_kind, u8"toggle-topmost" }, pin_config
             )
             };
-            element->set_action(
-                luil::ui_trigger::left_click,
-                [action](const luil::ui_action_context&) -> std::vector<luil::input_action> {
-                    return { luil::app_ui_command { static_cast<std::uint32_t>(action) } };
+            pin->set_access_name(
+                runtime_state_.settings.always_on_top ? u8"항상 위 · 고정됨" : u8"항상 위 · 고정 해제됨"
+            );
+            pin->set_action(luil::ui_trigger::left_click, command_action(runtime_command::toggle_always_on_top));
+            pin->set_enabled(runtime_state_.settings_writable && !dialog_open);
+            pin->set_cursor(pin->enabled() ? luil::ui_cursor::hand : luil::ui_cursor::arrow);
+            help.emplace(
+                u8"toggle-topmost",
+                help_content {
+                    .title = pin->accessibility().name,
+                    .body = runtime_state_.settings_writable
+                        ? u8"명령창을 다른 창보다 위에 표시합니다. 다시 누르면 해제합니다.\n재실행해도 설정이 "
+                          u8"유지됩니다. "
+                          u8"캡쳐 프레임은 항상 위에 표시됩니다."
+                        : u8"기존 설정 파일을 읽을 수 없어 변경을 중단했습니다. data/settings.json을 확인하세요."
                 }
             );
-            element->set_cursor(luil::ui_cursor::hand);
-            element->set_enabled(enabled && runtime_state_.dialog.kind == message_dialog_kind::none);
-            element->arrange({ { x * scale, y * scale, button_width * scale, 28 * scale }, scale });
-            root->add(std::move(element));
-        };
-        quick_button(
-            u8"quick-open-image",
-            u8"이미지 열기",
-            runtime_command::open_animation,
-            12,
-            82,
-            96,
-            !runtime_state_.busy && !runtime_state_.recording
-        );
-        if (runtime_state_.pending_recording)
-        {
-            quick_button(
-                u8"quick-edit-recording",
-                u8"녹화 편집",
-                runtime_command::edit_recording,
-                120,
-                82,
-                90,
-                !runtime_state_.busy && !runtime_state_.recording
-            );
+            pin->arrange({ { width - 60.0f * scale, 0, 28.0f * scale, caption_height }, scale });
+            root->add(std::move(pin));
         }
-        if (runtime_state_.busy)
+
+        // 둘째 줄은 이미지 열기·녹화 편집 링크와 현재 상태 배지다.
         {
-            quick_button(
-                u8"cancel-save",
-                runtime_state_.save_cancel_requested ? u8"취소 중…" : u8"저장 취소",
-                runtime_command::cancel_save,
-                width / scale - 108,
-                82,
-                96,
-                !runtime_state_.save_cancel_requested
-            );
-        }
-        else
-        {
-            const std::u8string state_text { runtime_state_.recording ? u8"녹화 중"
-                                                 : runtime_state_.pending_recording
-                                                 ? (runtime_state_.recording_saved ? u8"저장됨 · 원본 보관"
-                                                                                   : u8"저장 전 · 원본 보관")
-                                                 : region_state_.region ? u8"촬영 준비됨"
-                                                                        : u8"영역 선택부터 시작"
+            auto links { std::make_unique<luil::stack_element>(
+                luil::ui_element_id { command_kind, u8"quick-links" }, row_config(14.0f)
+            )
             };
-            auto badge { std::make_unique<luil::badge_element>(
-                luil::ui_element_id { command_kind, u8"capture-state" },
-                luil::badge_config { .text = state_text,
-                                     .tone = runtime_state_.pending_recording && !runtime_state_.recording_saved
-                                         ? luil::badge_tone::warning
-                                         : luil::badge_tone::accent
+            const bool can_open { !runtime_state_.busy && !runtime_state_.recording && !counting };
+            auto open { make_text_button(
+                u8"quick-open-image",
+                u8"이미지 열기",
+                runtime_command::open_animation,
+                can_open,
+                luil::text_button_visual::link
+            )
+            };
+            help.emplace(
+                u8"quick-open-image",
+                help_content { .title = u8"이미지 열기",
+                               .body = std::u8string { option_button_help(runtime_command::show_animation_editor) }
                 }
-            )
-            };
-            badge->arrange({ { width - 174 * scale, 86 * scale, 162 * scale, 24 * scale }, scale });
-            root->add(std::move(badge));
-        }
-        if (!runtime_state_.saved_output.empty() && !runtime_state_.busy && !runtime_state_.recording)
-        {
-            luil::toast_config result {};
-            result.id = u8"saved-result";
-            result.text
-                = runtime_state_.pending_recording && !runtime_state_.recording_saved ? u8"마지막 저장" : u8"저장 완료";
-            result.severity = luil::toast_severity::success;
-            result.action_label = {};
-            result.action = [](const luil::ui_action_context&) -> std::vector<luil::input_action> {
-                return { luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::open_saved_file) } };
-            };
-            auto toast { std::make_unique<luil::toast_element>(std::move(result)) };
-            toast->arrange({ { 12 * scale, 122 * scale, 112 * scale, 40 * scale }, scale });
-            root->add(std::move(toast));
-            const auto filename { runtime_state_.saved_output.filename().u8string() };
-            quick_button(
-                u8"saved-file", filename.c_str(), runtime_command::open_saved_file, 136, 128, width / scale - 264, true
             );
-            help[u8"saved-file"] = { .title = u8"저장 파일 열기", .body = runtime_state_.saved_output.u8string() };
-            quick_button(
-                u8"output-folder",
-                u8"저장 폴더 열기",
-                runtime_command::open_output_folder,
-                width / scale - 110,
-                128,
-                102,
-                true
-            );
+            links->add_fit(std::move(open));
+
+            if (runtime_state_.pending_recording)
+            {
+                auto edit { make_text_button(
+                    u8"quick-edit-recording",
+                    u8"녹화 편집",
+                    runtime_command::edit_recording,
+                    can_open,
+                    luil::text_button_visual::link
+                )
+                };
+                help.emplace(
+                    u8"quick-edit-recording",
+                    help_content { .title = u8"녹화 편집",
+                                   .body = std::u8string { option_button_help(runtime_command::edit_recording) }
+                    }
+                );
+                links->add_fit(std::move(edit));
+            }
+
+            links->add_flexible_gap();
+
+            if (runtime_state_.busy)
+            {
+                auto cancel { make_text_button(
+                    u8"cancel-save",
+                    runtime_state_.save_cancel_requested ? u8"취소 중…" : u8"저장 취소",
+                    runtime_command::cancel_save,
+                    !runtime_state_.save_cancel_requested,
+                    luil::text_button_visual::link
+                )
+                };
+                links->add_fit(std::move(cancel));
+            }
+            else
+            {
+                const std::u8string state_text {
+                    counting                                     ? runtime_state_.countdown_label
+                        : runtime_state_.recording               ? u8"녹화 중"
+                        : !runtime_state_.queued_capture.empty() ? u8"영역을 고르면 " + runtime_state_.queued_capture
+                        : runtime_state_.pending_recording
+                        ? (runtime_state_.recording_saved ? u8"저장됨 · 원본 보관" : u8"저장 전 · 원본 보관")
+                        : region_state_.region ? u8"촬영 준비됨"
+                                               : u8"영역 선택부터 시작"
+                };
+                auto badge { std::make_unique<luil::badge_element>(
+                    luil::ui_element_id { command_kind, u8"capture-state" },
+                    luil::badge_config { .text = state_text,
+                                         .tone = (runtime_state_.pending_recording && !runtime_state_.recording_saved)
+                                                 || counting
+                                             ? luil::badge_tone::warning
+                                             : luil::badge_tone::accent
+                    }
+                )
+                };
+                links->add_fit(std::move(badge));
+            }
+
+            links->arrange({ { 12.0f * scale, 84.0f * scale, width - 24.0f * scale, 26.0f * scale }, scale });
+            root->add(std::move(links));
         }
-        else
+
+        // 셋째 줄은 안내 → 경고 → 저장 결과 → 진행 상태 순서로 하나만 보인다.
         {
-            const auto status { !runtime_state_.settings_writable
-                                    ? std::u8string { u8"설정을 읽을 수 없습니다 · data/settings.json을 확인하세요." }
-                                    : !runtime_state_.shortcut_error.empty()
-                                    ? std::u8string { u8"단축키 등록 확인 필요 · 앱 설정에서 조합을 변경하세요." }
-                                    : !region_state_.region && !runtime_state_.busy
-                                    ? std::u8string { u8"① 영역 선택 → ② 사진 또는 녹화 → ③ 저장" }
-                                    : runtime_state_.status
+            const float status_width { width / scale - 24.0f };
+            const std::u8string warning {
+                !runtime_state_.settings_writable
+                    ? std::u8string { u8"설정을 읽을 수 없습니다 · data/settings.json을 확인하세요." }
+                    : !runtime_state_.shortcut_error.empty()
+                    ? std::u8string { u8"단축키 등록 확인 필요 · 앱 설정에서 조합을 변경하세요." }
+                    : std::u8string {}
             };
-            auto label { std::make_unique<luil::label_element>(
-                luil::ui_element_id { command_kind, u8"command-status" },
-                luil::label_config { .text = status, .font_size = 11, .wrap = true, .max_lines = 2 }
-            )
+            const bool show_saved { !runtime_state_.saved_output.empty() && !runtime_state_.busy
+                                    && !runtime_state_.recording && runtime_state_.notice.empty() && warning.empty()
+                                    && !counting && runtime_state_.queued_capture.empty()
             };
-            label->set_tooltip(status);
-            label->arrange({ { 12 * scale, 122 * scale, width - 24 * scale, 44 * scale }, scale });
-            root->add(std::move(label));
+
+            if (show_saved)
+            {
+                auto result { std::make_unique<luil::stack_element>(
+                    luil::ui_element_id { command_kind, u8"saved-result" }, row_config(10.0f)
+                )
+                };
+                auto check { std::make_unique<luil::glyph_element>(
+                    luil::ui_element_id { command_kind, u8"saved-icon" },
+                    luil::glyph_config { .glyph = luil::codicons::icon_pass, .font_size = 14.0f }
+                )
+                };
+                result->add(std::move(check), 16.0f);
+                const bool unsaved_draft { runtime_state_.pending_recording && !runtime_state_.recording_saved };
+                result->add_fit(make_label(
+                    u8"saved-caption",
+                    unsaved_draft ? u8"마지막 저장" : u8"저장 완료",
+                    11.0f,
+                    luil::label_color_role::dim
+                ));
+                const auto filename { runtime_state_.saved_output.filename().u8string() };
+                auto file { make_text_button(
+                    u8"saved-file", filename, runtime_command::open_saved_file, true, luil::text_button_visual::link
+                )
+                };
+                help[u8"saved-file"] = { .title = u8"저장 파일 열기", .body = runtime_state_.saved_output.u8string() };
+                result->add_flexible(std::move(file));
+                auto copy { make_text_button(
+                    u8"copy-saved", u8"복사", runtime_command::copy_saved_output, true, luil::text_button_visual::link
+                )
+                };
+                help[u8"copy-saved"]
+                    = { .title = u8"클립보드에 복사",
+                        .body = u8"저장한 파일을 클립보드에 넣습니다. 사진은 그림으로도 붙여 넣을 수 있습니다."
+                    };
+                result->add_fit(std::move(copy));
+                auto folder { make_text_button(
+                    u8"output-folder",
+                    u8"저장 폴더 열기",
+                    runtime_command::open_output_folder,
+                    true,
+                    luil::text_button_visual::link
+                )
+                };
+                help[u8"output-folder"]
+                    = { .title = u8"저장 폴더 열기",
+                        .body = std::u8string { option_button_help(runtime_command::open_output_folder) }
+                    };
+                result->add_fit(std::move(folder));
+                result->arrange({ { 12.0f * scale, 116.0f * scale, width - 24.0f * scale, 28.0f * scale }, scale });
+                root->add(std::move(result));
+            }
+            else
+            {
+                const auto& status { !runtime_state_.notice.empty() ? runtime_state_.notice
+                                         : !warning.empty()         ? warning
+                                         : !runtime_state_.queued_capture.empty()
+                                         ? std::u8string { u8"화면을 드래그하면 바로 시작합니다 · Esc로 취소" }
+                                         : !region_state_.region && !runtime_state_.busy && !runtime_state_.recording
+                                             && !counting
+                                         ? std::u8string { u8"① 영역 선택 → ② 사진 또는 녹화 → ③ 저장" }
+                                         : runtime_state_.status
+                };
+                const bool alert { runtime_state_.notice.empty() ? !warning.empty() : runtime_state_.notice_error };
+                auto [label, label_height] { make_note(
+                    u8"command-status",
+                    status,
+                    status_width,
+                    11.0f,
+                    2,
+                    alert ? luil::label_color_role::error : luil::label_color_role::primary
+                )
+                };
+                label->set_tooltip(status);
+                label->arrange(
+                    { { 12.0f * scale, 116.0f * scale, width - 24.0f * scale, std::max(label_height, 18.0f) * scale },
+                      scale
+                    }
+                );
+                root->add(std::move(label));
+            }
         }
 
         if (runtime_state_.options_open)
         {
-            auto content_root { std::make_unique<options_content_element>(scale) };
             const bool editable { !runtime_state_.busy && !runtime_state_.recording && runtime_state_.settings_writable
-                                  && runtime_state_.dialog.kind == message_dialog_kind::none
+                                  && !dialog_open && !counting
             };
-
             const float content_width { width / scale - 40.0f };
-            const float header_offset { command_window_height - 82.0f };
+            const float options_top { static_cast<float>(command_window_height) };
             const auto value_text = [](const int value) -> std::u8string {
                 const std::string text { std::to_string(value) };
                 return { text.begin(), text.end() };
             };
 
-            const auto label = [&](const char8_t* owner,
-                                   const std::u8string& text,
-                                   const float x,
-                                   const float y,
-                                   const float length,
-                                   const float size = 12.0f,
-                                   const bool wrap = false) {
-                help.emplace(owner, help_content { .title = u8"캡쳐 안내", .body = text });
-
-                if (wrap)
-                {
-                    auto element = std::make_unique<wrapped_help_element>(
-                        luil::ui_element_id { command_kind, owner },
-                        layout_help_text(text, length, size, 2),
-                        size,
-                        luil::label_color_role::dim,
-                        text
-                    );
-                    element->set_cursor(luil::ui_cursor::arrow);
-                    element->arrange({ { x * scale, y * scale, length * scale, 38.0f * scale }, scale });
-                    if (y < 200)
-                    {
-                        element->arrange(
-                            { { x * scale, (y + header_offset) * scale, length * scale, 38 * scale }, scale }
-                        );
-                        root->add(std::move(element));
-                    }
-                    else
-                    {
-                        content_root->add(std::move(element));
-                    }
-                    return;
-                }
-
-                auto element = std::make_unique<luil::label_element>(
-                    luil::ui_element_id { command_kind, owner },
-                    luil::label_config { .text = text, .font_size = size, .color = luil::label_color_role::primary }
-                );
-                element->set_cursor(luil::ui_cursor::arrow);
-                element->arrange({ { x * scale, y * scale, length * scale, 24.0f * scale }, scale });
-                if (y < 200)
-                {
-                    element->arrange({ { x * scale, (y + header_offset) * scale, length * scale, 24 * scale }, scale });
-                    root->add(std::move(element));
-                }
-                else
-                {
-                    content_root->add(std::move(element));
-                }
-            };
-
-            const auto card = [&](const char8_t* owner, const float y, const float card_height) {
-                luil::panel_config config {};
-                config.corner_radius = 8.0f;
-
-                auto element { std::make_unique<luil::panel_element>(
-                    luil::ui_element_id { command_kind, owner }, std::move(config)
+            // 머리는 제목·설명 한 줄과 탭이다. 흘리지 않는다.
+            {
+                auto header { std::make_unique<luil::stack_element>(
+                    luil::ui_element_id { command_kind, u8"options-header" }, row_config(10.0f)
                 )
                 };
-                element->arrange({ { 20.0f * scale, y * scale, content_width * scale, card_height * scale }, scale });
-                content_root->add(std::move(element));
-            };
-
-            const auto choice = [&](const char8_t* owner,
-                                    const char8_t* name,
-                                    std::vector<luil::choice_item> items,
-                                    const std::u8string& selected,
-                                    const runtime_command action,
-                                    const float y,
-                                    const bool available = true) {
-                luil::choice_group_config config {};
-                config.owner = owner;
-                config.name = name;
-                config.style = luil::choice_style::toggle;
-
-                const std::u8string prefix { std::u8string { owner } + u8"/" };
-
-                for (auto& item : items)
-                {
-                    item.value = prefix + item.value;
-
-                    const auto body = [&]() -> const char8_t* {
-                        if (action == runtime_command::set_compression)
-                        {
-                            return u8"저장 버튼을 누른 뒤 압축합니다. 균형은 무손실 화질을 유지하며 시간과 용량을 "
-                                   u8"절충합니다. 최대 압축은 더 작은 파일을 탐색하므로 오래 걸릴 수 있습니다. "
-                                   u8"손실·무손실은 저장 탭에서 선택합니다.";
-                        }
-
-                        if (item.value == u8"animation-format/gif")
-                        {
-                            return u8"추가 설치 없이 GIF를 저장합니다. 색상은 최대 256개이며 프레임 시간은 10ms "
-                                   u8"단위입니다.";
-                        }
-
-                        if (action == runtime_command::set_animation_format)
-                        {
-                            return u8"APNG는 무손실입니다. WebP는 저장 탭에서 손실·무손실 압축과 품질을 선택할 수 "
-                                   u8"있습니다.";
-                        }
-
-                        if (action == runtime_command::set_still_format)
-                        {
-                            return u8"PNG는 무손실입니다. WebP는 저장 탭에서 손실·무손실 압축을 선택할 수 있습니다.";
-                        }
-
-                        if (action == runtime_command::set_theme)
-                        {
-                            return u8"창과 팝업에 즉시 반영합니다. 시스템은 Windows 앱 테마를 따릅니다. 재실행해도 "
-                                   u8"선택이 유지됩니다.";
-                        }
-
-                        return u8"기본 인코더는 추가 설치 없이 동작합니다.";
-                    }();
-                    help.emplace(
-                        item.value,
-                        help_content { .title = std::u8string { name } + u8" · " + item.label, .body = body }
-                    );
-                }
-
-                config.items = std::move(items);
-                config.selected = prefix + selected;
-                config.select = [action, prefix](const std::u8string& value) -> luil::input_action {
-                    return luil::app_ui_command { static_cast<std::uint32_t>(action), value.substr(prefix.size()) };
-                };
-
-                auto element { std::make_unique<luil::choice_group_element>(std::move(config)) };
-                element->set_enabled(editable && available);
-                element->arrange(
-                    { { 140.0f * scale, y * scale, (content_width - 120.0f) * scale, 30.0f * scale }, scale }
+                header->add_fit(make_label(u8"options-title", u8"옵션", 15.0f));
+                header->add_flexible(make_label(
+                    u8"options-description",
+                    page_ == options_page::preferences ? u8"단축키는 적용을 눌러야 저장됩니다"
+                                                       : u8"바꾼 설정은 바로 저장됩니다",
+                    11.0f,
+                    luil::label_color_role::dim
+                ));
+                header->arrange(
+                    { { 20.0f * scale, (options_top + 4.0f) * scale, content_width * scale, 26.0f * scale }, scale }
                 );
-                content_root->add(std::move(element));
-            };
+                root->add(std::move(header));
+            }
 
-            const auto text_button = [&](const char8_t* owner,
-                                         const char8_t* text,
-                                         const runtime_command action,
-                                         const float x,
-                                         const float y,
-                                         const float length,
-                                         const bool enabled,
-                                         const luil::text_button_visual visual = luil::text_button_visual::normal) {
-                auto element { std::make_unique<luil::text_button_element>(
-                    luil::ui_element_id { command_kind, owner },
-                    luil::text_button_config { .text = text, .visual = visual }
-                )
-                };
-                element->set_access_name(text);
-                element->set_action(
-                    luil::ui_trigger::left_click,
-                    [action](const luil::ui_action_context&) -> std::vector<luil::input_action> {
-                        return { luil::app_ui_command { .command = static_cast<std::uint32_t>(action) } };
-                    }
-                );
-                element->set_enabled(enabled && runtime_state_.dialog.kind == message_dialog_kind::none);
-                help_content content {};
-                content.title = text;
-                content.body = option_button_help(action);
-                help.emplace(owner, std::move(content));
-                element->arrange({ { x * scale, y * scale, length * scale, 32.0f * scale }, scale });
-                content_root->add(std::move(element));
-            };
-            label(
-                u8"options-title",
-                page_ == options_page::preferences ? u8"앱 설정" : u8"캡쳐 설정",
-                20,
-                94,
-                content_width,
-                16
-            );
-            label(
-                u8"options-description",
-                page_ == options_page::preferences ? u8"단축키는 적용 버튼으로 저장합니다"
-                                                   : u8"설정은 자동 저장 · 녹화는 저장 버튼으로",
-                20,
-                122,
-                content_width,
-                11
-            );
             luil::tab_bar_config tabs {};
             tabs.owner = u8"options-tabs";
             tabs.items = { { u8"capture", u8"캡쳐" },
@@ -1241,671 +1079,857 @@ namespace chalkag {
             };
 
             auto tab_bar { std::make_unique<luil::tab_bar_element>(std::move(tabs)) };
-            tab_bar->set_enabled(runtime_state_.dialog.kind == message_dialog_kind::none);
+            tab_bar->set_enabled(!dialog_open);
             tab_bar->arrange(
-                { { 20.0f * scale, (158.0f + header_offset) * scale, content_width * scale, 32.0f * scale }, scale }
+                { { 20.0f * scale, (options_top + 36.0f) * scale, content_width * scale, 32.0f * scale }, scale }
             );
             root->add(std::move(tab_bar));
 
-            // 수집 옵션과 실제 출력 크기를 보여 주는 캡쳐 탭을 구성한다.
-            if (page_ == options_page::capture)
-            {
-                label(u8"format-heading", u8"저장 형식", 20, 208, content_width, 11);
-                label(u8"still-label", u8"스크린샷", 20, 242, 110);
-                choice(
-                    u8"still-format",
-                    u8"정지 이미지 형식",
-                    { { u8"png", u8"PNG" }, { u8"webp", u8"WebP" } },
-                    runtime_state_.settings.capture.still_format == image_format::png ? u8"png" : u8"webp",
-                    runtime_command::set_still_format,
-                    240
-                );
-                label(u8"animation-label", u8"애니메이션", 20, 284, 110);
+            // 본문은 위에서 아래로 쌓고, 담은 높이를 세어 흘리는 창의 내용 높이로 쓴다.
+            luil::stack_config page_config {};
+            page_config.padding = { 20.0f, 14.0f, 20.0f, 20.0f };
+            auto page { std::make_unique<luil::stack_element>(
+                luil::ui_element_id { command_kind, u8"options-content" }, page_config
+            )
+            };
+            float page_height { page_config.padding.top + page_config.padding.bottom };
+            const auto add = [&](std::unique_ptr<luil::ui_element> element, const float length) {
+                page_height += length;
+                page->add(std::move(element), length);
+            };
+            const auto gap = [&](const float length) {
+                page_height += length;
+                page->add_gap(length);
+            };
+            const auto add_note = [&](const char8_t* owner, const std::u8string& text, const std::size_t lines = 3) {
+                auto [element, note_height] { make_note(owner, text, content_width, 11.0f, lines) };
 
-                const auto format { runtime_state_.settings.capture.animation_format };
-                choice(
-                    u8"animation-format",
-                    u8"애니메이션 형식",
-                    { { u8"webp", u8"WebP" }, { u8"apng", u8"APNG" }, { u8"gif", u8"GIF" } },
-                    format == image_format::apng      ? u8"apng"
-                        : format == image_format::gif ? u8"gif"
-                                                      : u8"webp",
-                    runtime_command::set_animation_format,
-                    282
-                );
-                label(
-                    u8"animation-note",
-                    format == image_format::gif ? u8"GIF · Windows 내장 · 256색 · 레거시 호환"
-                                                : u8"WebP 손실·무손실 / APNG 무손실 · 저장 탭에서 설정",
-                    20,
-                    316,
-                    content_width,
-                    11
-                );
-                label(u8"output-heading", u8"녹화·출력", 20, 354, content_width, 11);
-                label(u8"fps-label", u8"프레임 속도", 20, 390, 160);
-                luil::dropdown_config fps {};
-                fps.owner = u8"fps";
-                fps.placeholder = u8"프레임 속도";
-
-                const int rate { runtime_state_.settings.capture.fps };
-                fps.text = value_text(rate) + u8" fps · "
-                    + (rate == 10       ? u8"가볍게"
-                           : rate == 16 ? u8"균형"
-                           : rate == 33 ? u8"고속"
-                                        : u8"부드럽게");
-                fps.open = fps_menu_open_;
-                fps.toggle = luil::make_message_action(fps_menu_intent { !fps_menu_open_ });
-                fps.set_open = [](const bool open) -> luil::input_action {
-                    return luil::make_app_action(fps_menu_intent { open });
-                };
-
-                auto dropdown { std::make_unique<luil::dropdown_element>(std::move(fps)) };
-                dropdown->set_access_name(u8"프레임 속도");
-                dropdown->set_enabled(editable && !runtime_state_.pending_recording);
-                dropdown->arrange(
-                    { { (width / scale - 205.0f) * scale, 388.0f * scale, 185.0f * scale, 32.0f * scale }, scale }
-                );
-                content_root->add(std::move(dropdown));
-                help.emplace(
-                    u8"fps",
-                    help_content { .title = u8"프레임 속도",
-                                   .body
-                                   = u8"초당 캡쳐할 프레임 수입니다. 높은 FPS는 움직임을 부드럽게 하며 CPU와 디스크 "
-                                     u8"사용량을 늘립니다."
-                    }
-                );
-                label(u8"scale-label", u8"출력 크기", 20, 432, 220);
-                label(
-                    u8"scale-value",
-                    value_text(runtime_state_.settings.capture.output_percent) + u8"%",
-                    width / scale - 75,
-                    432,
-                    55,
-                    15
-                );
-                luil::slider_config slider {};
-                slider.maximum = 5.0f;
-                slider.magnets = { 0, 1, 2, 3, 4, 5 };
-                slider.value = runtime_state_.output_step;
-
-                const auto scale_command = [](const runtime_command action, const float value) -> luil::input_action {
-                    const std::string text { std::to_string(value) };
-                    return luil::app_ui_command { static_cast<std::uint32_t>(action),
-                                                  std::u8string { text.begin(), text.end() }
-                    };
-                };
-                slider.change = [scale_command](const float delta) {
-                    return scale_command(runtime_command::adjust_scale, delta);
-                };
-                slider.change_to = [scale_command](const float value) {
-                    return scale_command(runtime_command::set_scale_index, value);
-                };
-
-                auto output_slider { std::make_unique<output_slider_element>(std::move(slider)) };
-                output_slider->set_access_name(u8"출력 배율 · 25, 50, 75, 100, 150, 200% 단계");
-                output_slider->set_enabled(editable);
-                output_slider->arrange(
-                    { { 20.0f * scale, 463.0f * scale, content_width * scale, 24.0f * scale }, scale }
-                );
-                content_root->add(std::move(output_slider));
-                help_content scale_help {};
-                scale_help.title = u8"출력 배율";
-                scale_help.body = u8"25·50·75·100·150·200% 단계로 조절합니다. 캡쳐 영역은 유지하며 저장될 이미지의 "
-                                  u8"크기만 변경합니다. 방향키로 한 단계씩 이동합니다.";
-                help.emplace(u8"scale", std::move(scale_help));
-                label(u8"scale-min", u8"25%", 20, 491, 70, 11);
-                label(u8"scale-original", u8"원본 100%", 20 + (content_width - 12) * 0.6f - 27, 491, 80, 11);
-                label(u8"scale-max", u8"200%", width / scale - 58, 491, 40, 11);
-                card(u8"output-card", 528, 64);
-                label(
-                    u8"output-caption",
-                    runtime_state_.pending_recording ? u8"사진 · 현재 영역" : u8"저장될 이미지",
-                    32,
-                    534,
-                    180,
-                    11
-                );
-
-                const auto selected { region_state_.region };
-
-                const int percent { runtime_state_.settings.capture.output_percent };
-                const auto dimensions = selected ? value_text(selected->width * percent / 100) + u8" × "
-                        + value_text(selected->height * percent / 100) + u8" px"
-                                                 : std::u8string { u8"영역을 선택하세요" };
-                label(u8"output-dimensions", dimensions, 32, 559, 230, 18);
-                label(u8"aspect-note", u8"비율 유지", width / scale - 95, 553, 75, 11);
-
-                text_button(
-                    u8"output-settings",
-                    u8"출력 품질·압축 설정 →",
-                    runtime_command::show_output_options,
-                    20,
-                    612,
-                    content_width,
-                    true
-                );
-                label(
-                    u8"capture-export-note",
-                    u8"형식·크기·품질은 내보내기에서 함께 확인할 수 있습니다",
-                    20,
-                    650,
-                    content_width,
-                    11
-                );
-            }
-            // 영역 좌표·크기·프리셋과 프레임 외곽 표시를 한 탭에서 관리한다.
-            else if (page_ == options_page::region)
-            {
-                card(u8"region-card", 214, 112);
-
-                const auto selected { region_state_.region };
-                label(u8"region-heading", u8"현재 캡쳐 영역", 32, 220, 240, 11);
-                label(
-                    u8"current-region",
-                    selected ? value_text(selected->width) + u8" × " + value_text(selected->height) + u8" px"
-                             : std::u8string { u8"아직 선택한 영역이 없습니다" },
-                    32,
-                    248,
-                    content_width - 24,
-                    18
-                );
-                label(
-                    u8"region-position",
-                    selected ? u8"X " + value_text(selected->x) + u8" · Y " + value_text(selected->y)
-                             : std::u8string { u8"위치와 크기로 새 프레임을 만들 수 있습니다" },
-                    32,
-                    282,
-                    content_width - 24,
-                    11
-                );
-                text_button(
-                    u8"edit-region",
-                    u8"위치·크기 편집",
-                    runtime_command::show_region_editor,
-                    20,
-                    344,
-                    content_width,
-                    !runtime_state_.busy && !runtime_state_.recording,
-                    luil::text_button_visual::accent
-                );
-                help[u8"edit-region"]
-                    = { .title = u8"캡쳐 영역 설정",
-                        .body = u8"X·Y 위치와 가로·세로 크기를 픽셀 단위로 입력합니다. 자주 쓰는 크기로 새 프레임을 "
-                                u8"만들거나 현재 영역을 정밀하게 조절할 수 있습니다."
-                    };
-                label(u8"preset-heading", u8"저장한 프리셋", 20, 398, content_width, 11);
-
-                const auto preset = runtime_state_.settings.presets.empty()
-                    ? std::u8string { u8"저장된 영역 프리셋이 없습니다." }
-                    : value_text(runtime_state_.preset_index + 1) + u8" / "
-                        + value_text(static_cast<int>(runtime_state_.settings.presets.size())) + u8" · "
-                        + runtime_state_.settings.presets[static_cast<std::size_t>(runtime_state_.preset_index)].name;
-                label(u8"preset-name", preset, 20, 430, content_width, 12, true);
-
-                const bool can_apply { !runtime_state_.settings.presets.empty() && !runtime_state_.busy
-                                       && !runtime_state_.recording
-                };
-                luil::dropdown_config presets {};
-                presets.owner = u8"preset-picker";
-                presets.text = preset;
-                presets.placeholder = u8"프리셋 선택";
-                presets.open = preset_menu_open_;
-                presets.set_open = [](const bool open) { return luil::make_app_action(preset_menu_intent { open }); };
-                auto dropdown { std::make_unique<luil::dropdown_element>(std::move(presets)) };
-                dropdown->set_access_name(u8"영역 프리셋 선택");
-                dropdown->set_enabled(can_apply);
-                dropdown->arrange({ { 20 * scale, 470 * scale, content_width * scale, 32 * scale }, scale });
-                content_root->add(std::move(dropdown));
-                luil::text_input_config name_config {};
-                name_config.placeholder = u8"프리셋 이름";
-                auto name { std::make_unique<luil::text_input_element>(
-                    luil::ui_element_id { luil::application_element_kind(12), u8"preset-name-input" },
-                    luil::make_text_input_view(
-                        preset_name_, preset_composition_, static_cast<luil::text_input_target>(205)
-                    ),
-                    name_config
-                )
-                };
-                name->set_access_name(u8"프리셋 이름");
-                name->set_enabled(can_apply && editable);
-                name->arrange({ { 20 * scale, 512 * scale, (content_width - 100) * scale, 32 * scale }, scale });
-                content_root->add(std::move(name));
-                auto rename { std::make_unique<luil::text_button_element>(
-                    luil::ui_element_id { command_kind, u8"rename-preset" },
-                    luil::text_button_config { .text = u8"이름 변경" }
-                )
-                };
-                rename->set_enabled(can_apply && editable && !preset_name_.text.empty() && !preset_composition_);
-                rename->set_action(
-                    luil::ui_trigger::left_click,
-                    [text = preset_name_.text](const luil::ui_action_context&) -> std::vector<luil::input_action> {
-                        return { luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::rename_preset),
-                                                        text
-                        }
-                        };
-                    }
-                );
-                rename->arrange({ { (width / scale - 110) * scale, 512 * scale, 90 * scale, 32 * scale }, scale });
-                content_root->add(std::move(rename));
-                text_button(
-                    u8"apply-preset",
-                    u8"선택 영역 적용",
-                    runtime_command::apply_preset,
-                    20,
-                    554,
-                    content_width - 180,
-                    can_apply,
-                    luil::text_button_visual::accent
-                );
-                text_button(
-                    u8"save-preset",
-                    u8"현재 영역 저장",
-                    runtime_command::save_preset,
-                    width / scale - 190,
-                    554,
-                    170,
-                    editable && selected.has_value()
-                );
-                text_button(
-                    u8"delete-preset",
-                    u8"프리셋 삭제",
-                    runtime_command::delete_preset,
-                    20,
-                    596,
-                    116,
-                    can_apply && editable,
-                    luil::text_button_visual::danger
-                );
-                if (runtime_state_.can_undo_delete)
+                if (note_height > 0.0f)
                 {
-                    text_button(
-                        u8"undo-delete-preset",
-                        u8"삭제 취소",
-                        runtime_command::undo_delete_preset,
-                        148,
-                        596,
-                        116,
-                        editable
+                    add(std::move(element), note_height);
+                }
+            };
+            const auto heading = [&](const char8_t* owner, const std::u8string& text) {
+                add(make_label(owner, text, 13.0f), 24.0f);
+                gap(6.0f);
+            };
+            // 왼쪽 라벨과 오른쪽 조작 요소를 한 줄에 둔다.
+            const auto field = [&](const char8_t* owner,
+                                   const std::u8string& text,
+                                   std::unique_ptr<luil::ui_element> control,
+                                   const float control_height = 30.0f) {
+                auto line { std::make_unique<luil::stack_element>(
+                    luil::ui_element_id { command_kind, std::u8string { owner } + u8"-row" }, row_config(12.0f)
+                )
+                };
+                line->add(make_label(owner, text), 108.0f);
+                line->add_flexible(std::move(control));
+                add(std::move(line), control_height);
+            };
+            const auto choice = [&](const char8_t* owner,
+                                    const char8_t* name,
+                                    std::vector<luil::choice_item> items,
+                                    const std::u8string& selected,
+                                    const runtime_command action,
+                                    const bool available = true) {
+                luil::choice_group_config config {};
+                config.owner = owner;
+                config.name = name;
+                config.style = luil::choice_style::toggle;
+
+                const std::u8string prefix { std::u8string { owner } + u8"/" };
+
+                for (auto& item : items)
+                {
+                    item.value = prefix + item.value;
+
+                    const auto body = [&]() -> const char8_t* {
+                        if (action == runtime_command::set_compression)
+                        {
+                            return u8"저장 버튼을 누른 뒤 압축합니다. 균형은 무손실 화질을 유지하며 시간과 용량을 "
+                                   u8"절충합니다. 최대 압축은 더 작은 파일을 탐색하므로 오래 걸릴 수 있습니다. "
+                                   u8"손실·무손실은 바로 위 WebP 압축에서 선택합니다.";
+                        }
+
+                        if (item.value == u8"animation-format/gif")
+                        {
+                            return u8"추가 설치 없이 GIF를 저장합니다. 색상은 최대 256개이며 프레임 시간은 10ms "
+                                   u8"단위입니다.";
+                        }
+
+                        if (action == runtime_command::set_animation_format)
+                        {
+                            return u8"APNG는 무손실입니다. WebP는 아래 WebP 압축에서 손실·무손실과 품질을 선택할 수 "
+                                   u8"있습니다.";
+                        }
+
+                        if (action == runtime_command::set_still_format)
+                        {
+                            return u8"PNG는 무손실입니다. WebP는 내보내기 탭에서 손실·무손실 압축을 선택할 수 "
+                                   u8"있습니다.";
+                        }
+
+                        if (action == runtime_command::set_capture_delay)
+                        {
+                            return u8"사진·녹화를 누른 뒤 이 시간만큼 기다렸다가 시작합니다. 메뉴를 열어 둔 화면을 "
+                                   u8"찍을 때 "
+                                   u8"씁니다.";
+                        }
+
+                        return u8"기본 인코더는 추가 설치 없이 동작합니다.";
+                    }();
+                    help.emplace(
+                        item.value,
+                        help_content { .title = std::u8string { name } + u8" · " + item.label, .body = body }
                     );
                 }
-                luil::check_config topmost {};
-                topmost.owner = u8"always-on-top";
-                topmost.label = u8"명령창 항상 위";
-                topmost.checked = runtime_state_.settings.always_on_top;
-                topmost.toggle = [](const luil::ui_action_context&) -> std::vector<luil::input_action> {
-                    return { luil::app_ui_command {
-                        .command = static_cast<std::uint32_t>(runtime_command::toggle_always_on_top)
-                    }
-                    };
+
+                config.items = std::move(items);
+                config.selected = prefix + selected;
+                config.select = [action, prefix](const std::u8string& value) -> luil::input_action {
+                    return luil::app_ui_command { static_cast<std::uint32_t>(action), value.substr(prefix.size()) };
                 };
 
-                auto topmost_element { std::make_unique<luil::check_element>(std::move(topmost)) };
-                topmost_element->set_enabled(runtime_state_.settings_writable);
-                topmost_element->arrange(
-                    { { 20.0f * scale, 642.0f * scale, content_width * scale, luil::check_row_height * scale }, scale }
-                );
-                content_root->add(std::move(topmost_element));
-                help[u8"always-on-top"]
-                    = { .title = u8"명령창 항상 위",
-                        .body = u8"명령창을 다른 창보다 위에 표시합니다. 설정은 재실행해도 유지됩니다."
-                    };
-                label(u8"glow-label", u8"글로우 두께", 20, 682, 160);
-                label(
-                    u8"glow-value",
-                    value_text(runtime_state_.settings.glow_width) + u8" px",
-                    width / scale - 80,
-                    682,
-                    60
-                );
-                luil::slider_config glow {};
-                glow.minimum = 0;
-                glow.maximum = 40;
-                glow.magnets = { 0, 12, 24, 40 };
-                glow.value = runtime_state_.glow_position;
-                glow.change_to = [](const float value) -> luil::input_action {
-                    const auto number { std::to_string(static_cast<int>(std::clamp(value, 0.0f, 40.0f) + 0.5f)) };
-                    return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::set_glow_width),
-                                                  { number.begin(), number.end() }
-                    };
-                };
-                glow.change = [](const float delta) -> luil::input_action {
-                    const auto number { std::to_string(delta) };
-                    return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::adjust_glow_width),
-                                                  { number.begin(), number.end() }
-                    };
-                };
-
-                auto slider { std::make_unique<luil::slider_element>(
-                    luil::ui_element_id { command_kind, u8"glow-width" }, std::move(glow)
+                const float choice_height { luil::choice_group_element::height_for(config) };
+                auto element { std::make_unique<luil::choice_group_element>(std::move(config)) };
+                element->set_enabled(editable && available);
+                return std::pair<std::unique_ptr<luil::ui_element>, float> { std::move(element), choice_height };
+            };
+            const auto check_box = [&](const char8_t* owner,
+                                       const std::u8string& text,
+                                       const bool checked,
+                                       const runtime_command action,
+                                       const bool enabled,
+                                       const std::u8string& body) {
+                luil::check_config config {};
+                config.owner = owner;
+                config.label = text;
+                config.checked = checked;
+                config.toggle = command_action(action);
+                auto element { std::make_unique<luil::check_element>(std::move(config)) };
+                element->set_enabled(enabled && !dialog_open);
+                help[owner] = { .title = text, .body = body };
+                add(std::move(element), luil::check_row_height);
+            };
+            // 같은 폭으로 나눈 버튼 줄이다.
+            const auto button_row = [&](const char8_t* owner, std::vector<std::unique_ptr<luil::ui_element>> buttons) {
+                auto line { std::make_unique<luil::stack_element>(
+                    luil::ui_element_id { command_kind, owner }, row_config(10.0f)
                 )
                 };
-                slider->set_access_name(u8"프레임 글로우 두께 · 0~40px");
-                slider->set_tooltip(u8"프레임 글로우 두께 · 0~40px");
-                slider->set_enabled(editable);
-                slider->arrange({ { 20 * scale, 650 * scale, content_width * scale, 24 * scale }, scale });
-                content_root->add(std::move(slider));
-                help[u8"glow-width"]
-                    = { .title = u8"프레임 글로우 두께",
-                        .body
-                        = u8"프레임 바깥으로 번지는 빛의 범위를 조절합니다. 0은 끄기입니다. 캡쳐 영역 안은 그대로 "
-                          u8"유지됩니다."
+                for (auto& button : buttons)
+                {
+                    line->add_flexible(std::move(button));
+                }
+                add(std::move(line), 32.0f);
+            };
+            const auto option_button = [&](const char8_t* owner,
+                                           const char8_t* text,
+                                           const runtime_command action,
+                                           const bool enabled,
+                                           const luil::text_button_visual visual = luil::text_button_visual::normal) {
+                auto element { make_text_button(owner, text, action, enabled, visual) };
+                help.emplace(
+                    owner, help_content { .title = text, .body = std::u8string { option_button_help(action) } }
+                );
+                return element;
+            };
+
+            const auto& settings { runtime_state_.settings };
+            const auto selected_region { region_state_.region };
+
+            // 캡쳐 탭은 무엇을 어떻게 수집할지만 둔다. 출력 크기·품질은 내보내기 탭이 맡는다.
+            if (page_ == options_page::capture)
+            {
+                heading(u8"still-heading", u8"사진");
+                {
+                    auto [element, choice_height] { choice(
+                        u8"still-format",
+                        u8"정지 이미지 형식",
+                        { { u8"png", u8"PNG" }, { u8"webp", u8"WebP" } },
+                        settings.capture.still_format == image_format::png ? u8"png" : u8"webp",
+                        runtime_command::set_still_format
+                    )
                     };
+                    field(u8"still-label", u8"형식", std::move(element), choice_height);
+                }
+                gap(8.0f);
+                {
+                    const int percent { settings.capture.output_percent };
+                    auto line { std::make_unique<luil::stack_element>(
+                        luil::ui_element_id { command_kind, u8"still-size-row" }, row_config(12.0f)
+                    )
+                    };
+                    line->add(make_label(u8"still-size-label", u8"저장 크기"), 108.0f);
+                    line->add_flexible(make_label(
+                        u8"output-dimensions",
+                        selected_region ? value_text(selected_region->width * percent / 100) + u8" × "
+                                + value_text(selected_region->height * percent / 100) + u8" px · " + value_text(percent)
+                                + u8"%"
+                                        : std::u8string { u8"영역을 선택하세요" }
+                    ));
+                    auto link { make_text_button(
+                        u8"output-settings",
+                        u8"크기·품질 변경",
+                        runtime_command::show_output_options,
+                        true,
+                        luil::text_button_visual::link
+                    )
+                    };
+                    help[u8"output-settings"]
+                        = { .title = u8"출력 크기·품질",
+                            .body
+                            = u8"내보내기 탭에서 출력 크기와 WebP 품질·압축 속도를 바꿉니다. 사진과 애니메이션에 함께 "
+                              u8"적용됩니다."
+                        };
+                    line->add_fit(std::move(link));
+                    add(std::move(line), 26.0f);
+                }
+                gap(6.0f);
+                check_box(
+                    u8"copy-clipboard",
+                    u8"사진을 클립보드에도 복사",
+                    settings.copy_to_clipboard,
+                    runtime_command::toggle_clipboard,
+                    editable,
+                    u8"사진을 저장한 뒤 그림과 파일을 클립보드에 넣습니다. 채팅·문서에 바로 붙여 넣을 수 있습니다."
+                );
+                gap(18.0f);
+                heading(u8"record-heading", u8"녹화");
+                {
+                    luil::dropdown_config fps {};
+                    fps.owner = u8"fps";
+                    fps.placeholder = u8"프레임 속도";
+                    const int rate { settings.capture.fps };
+                    fps.text = value_text(rate) + u8" fps · "
+                        + (rate == 10       ? u8"가볍게"
+                               : rate == 16 ? u8"균형"
+                               : rate == 24 ? u8"자연스럽게"
+                               : rate == 33 ? u8"고속"
+                                            : u8"부드럽게");
+                    fps.open = fps_menu_open_;
+                    fps.toggle = luil::make_message_action(fps_menu_intent { !fps_menu_open_ });
+                    fps.set_open = [](const bool open) -> luil::input_action {
+                        return luil::make_app_action(fps_menu_intent { open });
+                    };
+                    auto dropdown { std::make_unique<luil::dropdown_element>(std::move(fps)) };
+                    dropdown->set_access_name(u8"프레임 속도");
+                    dropdown->set_enabled(editable && !runtime_state_.pending_recording);
+                    help.emplace(
+                        u8"fps",
+                        help_content {
+                            .title = u8"프레임 속도",
+                            .body = u8"초당 캡쳐할 프레임 수입니다. 높은 FPS는 움직임을 부드럽게 하며 CPU와 디스크 "
+                                    u8"사용량을 늘립니다."
+                        }
+                    );
+                    field(u8"fps-label", u8"프레임 속도", std::move(dropdown), 32.0f);
+                }
+                if (runtime_state_.pending_recording)
+                {
+                    gap(4.0f);
+                    add_note(u8"fps-locked", u8"보관 녹화가 있는 동안 프레임 속도와 커서 포함은 바꿀 수 없습니다.");
+                }
+                gap(18.0f);
+                heading(u8"common-heading", u8"공통");
+                {
+                    const int delay { settings.capture_delay };
+                    auto [element, choice_height] { choice(
+                        u8"capture-delay",
+                        u8"촬영 지연",
+                        { { u8"0", u8"바로" }, { u8"3", u8"3초" }, { u8"5", u8"5초" }, { u8"10", u8"10초" } },
+                        value_text(delay),
+                        runtime_command::set_capture_delay
+                    )
+                    };
+                    field(u8"delay-label", u8"촬영 지연", std::move(element), choice_height);
+                }
+                gap(8.0f);
+                check_box(
+                    u8"include-cursor",
+                    u8"마우스 커서 포함",
+                    settings.capture.include_cursor,
+                    runtime_command::toggle_cursor,
+                    editable && !runtime_state_.pending_recording,
+                    u8"촬영 당시의 마우스 포인터를 사진과 녹화에 넣습니다."
+                );
             }
-            // 보관 원본을 유지한 채 출력 형식과 압축 옵션으로 다시 저장할 수 있게 한다.
+            // 영역 좌표·크기와 프리셋을 관리한다.
+            else if (page_ == options_page::region)
+            {
+                {
+                    luil::panel_config card_config {};
+                    card_config.corner_radius = 8.0f;
+                    auto card { std::make_unique<luil::panel_element>(
+                        luil::ui_element_id { command_kind, u8"region-card" }, std::move(card_config)
+                    )
+                    };
+                    luil::stack_config inner_config {};
+                    inner_config.padding = luil::edge_insets::symmetric(16.0f, 12.0f);
+                    inner_config.spacing = 2.0f;
+                    auto inner { std::make_unique<luil::stack_element>(
+                        luil::ui_element_id { command_kind, u8"region-card-content" }, inner_config
+                    )
+                    };
+                    inner->add(
+                        make_label(u8"region-heading", u8"현재 캡쳐 영역", 11.0f, luil::label_color_role::dim), 20.0f
+                    );
+                    inner->add(
+                        make_label(
+                            u8"current-region",
+                            selected_region ? value_text(selected_region->width) + u8" × "
+                                    + value_text(selected_region->height) + u8" px"
+                                            : std::u8string { u8"아직 선택한 영역이 없습니다" },
+                            18.0f
+                        ),
+                        30.0f
+                    );
+                    inner->add(
+                        make_label(
+                            u8"region-position",
+                            selected_region
+                                ? u8"X " + value_text(selected_region->x) + u8" · Y " + value_text(selected_region->y)
+                                : std::u8string { u8"위치와 크기를 입력해 새 프레임을 만들 수 있습니다" },
+                            11.0f,
+                            luil::label_color_role::dim
+                        ),
+                        20.0f
+                    );
+                    card->set_content(std::move(inner));
+                    add(std::move(card), 98.0f);
+                }
+                gap(10.0f);
+                {
+                    auto edit { option_button(
+                        u8"edit-region",
+                        u8"위치·크기 편집",
+                        runtime_command::show_region_editor,
+                        !runtime_state_.busy && !runtime_state_.recording && !counting,
+                        luil::text_button_visual::accent
+                    )
+                    };
+                    help[u8"edit-region"]
+                        = { .title = u8"캡쳐 영역 설정",
+                            .body
+                            = u8"X·Y 위치와 가로·세로 크기를 픽셀 단위로 입력합니다. 자주 쓰는 크기로 새 프레임을 "
+                              u8"만들거나 현재 영역을 정밀하게 조절할 수 있습니다."
+                        };
+                    add(std::move(edit), 32.0f);
+                }
+                gap(22.0f);
+                heading(u8"preset-heading", u8"저장한 프리셋");
+
+                const bool has_presets { !settings.presets.empty() };
+                const bool can_apply { has_presets && !runtime_state_.busy && !runtime_state_.recording && !counting };
+                {
+                    const auto preset {
+                        has_presets ? value_text(runtime_state_.preset_index + 1) + u8" / "
+                                + value_text(static_cast<int>(settings.presets.size())) + u8" · "
+                                + settings.presets[static_cast<std::size_t>(runtime_state_.preset_index)].name
+                                    : std::u8string { u8"저장된 영역 프리셋이 없습니다" }
+                    };
+                    luil::dropdown_config presets {};
+                    presets.owner = u8"preset-picker";
+                    presets.text = preset;
+                    presets.placeholder = u8"프리셋 선택";
+                    presets.open = preset_menu_open_;
+                    presets.set_open
+                        = [](const bool open) { return luil::make_app_action(preset_menu_intent { open }); };
+                    auto dropdown { std::make_unique<luil::dropdown_element>(std::move(presets)) };
+                    dropdown->set_access_name(u8"영역 프리셋 선택");
+                    dropdown->set_enabled(can_apply && !dialog_open);
+                    help[u8"preset-picker"]
+                        = { .title = u8"영역 프리셋",
+                            .body = std::u8string { option_button_help(runtime_command::next_preset) }
+                        };
+                    add(std::move(dropdown), 32.0f);
+                }
+                gap(8.0f);
+                {
+                    auto line { std::make_unique<luil::stack_element>(
+                        luil::ui_element_id { command_kind, u8"preset-name-row" }, row_config(10.0f)
+                    )
+                    };
+                    luil::text_input_config name_config {};
+                    name_config.placeholder = u8"프리셋 이름";
+                    auto name { std::make_unique<luil::text_input_element>(
+                        luil::ui_element_id { luil::application_element_kind(12), u8"preset-name-input" },
+                        luil::make_text_input_view(
+                            preset_name_, preset_composition_, static_cast<luil::text_input_target>(205)
+                        ),
+                        name_config
+                    )
+                    };
+                    name->set_access_name(u8"프리셋 이름");
+                    name->set_enabled(can_apply && editable);
+                    line->add_flexible(std::move(name));
+                    auto rename { std::make_unique<luil::text_button_element>(
+                        luil::ui_element_id { command_kind, u8"rename-preset" },
+                        luil::text_button_config { .text = u8"이름 변경" }
+                    )
+                    };
+                    rename->set_access_name(u8"이름 변경");
+                    rename->set_enabled(can_apply && editable && !preset_name_.text.empty() && !preset_composition_);
+                    rename->set_action(
+                        luil::ui_trigger::left_click, command_action(runtime_command::rename_preset, preset_name_.text)
+                    );
+                    line->add(std::move(rename), 96.0f);
+                    add(std::move(line), 32.0f);
+                }
+                gap(8.0f);
+                {
+                    std::vector<std::unique_ptr<luil::ui_element>> buttons {};
+                    buttons.push_back(option_button(
+                        u8"apply-preset",
+                        u8"프리셋 적용",
+                        runtime_command::apply_preset,
+                        can_apply,
+                        luil::text_button_visual::accent
+                    ));
+                    buttons.push_back(option_button(
+                        u8"save-preset",
+                        u8"현재 영역 저장",
+                        runtime_command::save_preset,
+                        editable && selected_region.has_value()
+                    ));
+                    button_row(u8"preset-buttons", std::move(buttons));
+                }
+                gap(8.0f);
+                {
+                    auto line { std::make_unique<luil::stack_element>(
+                        luil::ui_element_id { command_kind, u8"preset-delete-row" }, row_config(10.0f)
+                    )
+                    };
+                    line->add_fit(option_button(
+                        u8"delete-preset",
+                        u8"프리셋 삭제",
+                        runtime_command::delete_preset,
+                        can_apply && editable,
+                        luil::text_button_visual::danger
+                    ));
+                    if (runtime_state_.can_undo_delete)
+                    {
+                        line->add_fit(option_button(
+                            u8"undo-delete-preset", u8"삭제 취소", runtime_command::undo_delete_preset, editable
+                        ));
+                    }
+                    line->add_flexible_gap();
+                    add(std::move(line), 32.0f);
+                }
+            }
+            // 보관 원본을 유지한 채 출력 형식·크기·압축으로 다시 저장할 수 있게 한다.
             else if (page_ == options_page::output)
             {
-                const auto& settings { runtime_state_.settings };
-                card(u8"draft-card", 208, 104);
-                label(
-                    u8"draft-heading",
-                    runtime_state_.pending_recording ? u8"보관 중인 녹화" : u8"정지 후 원본을 보관합니다",
-                    36,
-                    220,
-                    content_width - 32,
-                    11
-                );
-
-                const auto source { runtime_state_.recorded_region };
-                const auto duration { recording_time(static_cast<std::uint64_t>(runtime_state_.recorded_duration)) };
-                label(
-                    u8"draft-info",
-                    runtime_state_.pending_recording
-                        ? duration + u8" · " + value_text(source.width) + u8" × " + value_text(source.height) + u8" px"
-                        : u8"저장 버튼으로 내보내기",
-                    36,
-                    248,
-                    content_width - 32,
-                    14
-                );
-                label(u8"draft-saved", runtime_state_.saved_summary, 36, 276, content_width - 32, 11);
-                label(u8"save-format-label", u8"애니메이션", 20, 332, 110);
-                choice(
-                    u8"animation-format",
-                    u8"애니메이션 형식",
-                    { { u8"webp", u8"WebP" }, { u8"apng", u8"APNG" }, { u8"gif", u8"GIF" } },
-                    settings.capture.animation_format == image_format::apng      ? u8"apng"
-                        : settings.capture.animation_format == image_format::gif ? u8"gif"
-                                                                                 : u8"webp",
-                    runtime_command::set_animation_format,
-                    330
-                );
-
-                const bool webp { settings.capture.animation_format == image_format::webp
-                                  || settings.capture.still_format == image_format::webp
-                };
-                label(u8"webp-mode-label", u8"WebP 압축", 20, 376, 110);
-                choice(
-                    u8"webp-mode",
-                    u8"WebP 압축 방식",
-                    { { u8"lossless", u8"무손실" }, { u8"lossy", u8"손실" } },
-                    settings.capture.webp_lossless ? u8"lossless" : u8"lossy",
-                    runtime_command::set_webp_mode,
-                    374,
-                    webp
-                );
-                label(u8"quality-label", u8"손실 압축 품질", 20, 417, 230);
-                label(u8"quality-value", value_text(settings.capture.webp_quality), width / scale - 72, 417, 52, 14);
-                luil::slider_config quality {};
-                quality.minimum = 1;
-                quality.maximum = 100;
-                quality.value = runtime_state_.quality_position;
-                quality.magnets = { 50, 75, 80, 90, 100 };
-
-                const auto quality_command = [](const runtime_command action, const float value) -> luil::input_action {
-                    const auto text { std::to_string(value) };
-                    return luil::app_ui_command { static_cast<std::uint32_t>(action), { text.begin(), text.end() } };
-                };
-                quality.change = [quality_command](const float delta) {
-                    return quality_command(runtime_command::adjust_webp_quality, delta);
-                };
-                quality.change_to = [quality_command](const float value) {
-                    return quality_command(runtime_command::set_webp_quality, value);
-                };
-
-                auto slider { std::make_unique<luil::slider_element>(
-                    luil::ui_element_id { command_kind, u8"webp-quality" }, std::move(quality)
-                )
-                };
-                slider->set_access_name(u8"WebP 손실 압축 품질 · 1~100");
-                slider->set_tooltip(u8"WebP 손실 압축 품질 · 1~100");
-                slider->set_enabled(editable && webp && !settings.capture.webp_lossless);
-                slider->arrange({ { 20 * scale, 446 * scale, content_width * scale, 24 * scale }, scale });
-                content_root->add(std::move(slider));
-                help[u8"webp-quality"] = {
-                    .title = u8"WebP 손실 압축 품질",
-                    .body = u8"낮을수록 파일이 작아지고 화질이 떨어집니다. 저장 후 품질이나 캡쳐 탭의 출력 크기를 바꿔 "
-                            u8"다시 저장할 수 있습니다. 보관 원본에는 영향을 주지 않습니다.",
-                };
-
-                const auto source_region { runtime_state_.pending_recording
-                                               ? std::optional<capture_region> { runtime_state_.recorded_region }
-                                               : region_state_.region
-                };
-                const int output_percent { settings.capture.output_percent };
-                const auto output_dimensions {
-                    value_text(output_percent) + u8"% · "
-                    + (source_region ? value_text(source_region->width * output_percent / 100) + u8" × "
-                               + value_text(source_region->height * output_percent / 100) + u8" px"
-                                     : std::u8string { u8"영역을 선택하세요" })
-                };
-                label(u8"export-scale-label", u8"출력 크기", 20, 484, 110);
-                label(u8"export-output-dimensions", output_dimensions, 140, 484, content_width - 120);
-                luil::slider_config scale_config {};
-                scale_config.maximum = 5;
-                scale_config.value = runtime_state_.output_step;
-                scale_config.magnets = { 0, 1, 2, 3, 4, 5 };
-                const auto scale_action = [](const runtime_command command, const float value) -> luil::input_action {
-                    const auto text { std::to_string(value) };
-                    return luil::app_ui_command { static_cast<std::uint32_t>(command), { text.begin(), text.end() } };
-                };
-                scale_config.change
-                    = [scale_action](const float delta) { return scale_action(runtime_command::adjust_scale, delta); };
-                scale_config.change_to = [scale_action](const float value) {
-                    return scale_action(runtime_command::set_scale_index, value);
-                };
-                auto scale_slider { std::make_unique<output_slider_element>(scale_config) };
-                scale_slider->set_enabled(editable);
-                scale_slider->arrange({ { 20 * scale, 514 * scale, content_width * scale, 24 * scale }, scale });
-                content_root->add(std::move(scale_slider));
-                label(u8"export-scale-note", u8"25 · 50 · 75 · 100 · 150 · 200%", 20, 542, content_width, 11);
-
-                label(u8"compression-label", u8"압축 속도", 20, 576, 110);
-
-                const auto compression { settings.capture.compression };
-                choice(
-                    u8"compression",
-                    u8"WebP 저장 방식",
-                    { { u8"fast", u8"빠른 저장" }, { u8"small", u8"균형" }, { u8"maximum", u8"최대 압축" } },
-                    compression == lossless_compression::fast          ? u8"fast"
-                        : compression == lossless_compression::maximum ? u8"maximum"
-                                                                       : u8"small",
-                    runtime_command::set_compression,
-                    574,
-                    webp
-                );
-                label(
-                    u8"compression-note",
-                    !webp                                           ? u8"WebP 선택 시 사용할 수 있습니다."
-                        : compression == lossless_compression::fast ? u8"후처리를 생략해 빠르게 저장합니다."
-                        : compression == lossless_compression::maximum
-                        ? u8"최대 압축은 저장에 오래 걸릴 수 있습니다."
-                        : u8"권장 · 저장 속도와 파일 크기의 균형을 맞춥니다.",
-                    20,
-                    608,
-                    content_width,
-                    11
-                );
-
-                const auto check_box = [&](const char8_t* owner,
-                                           const char8_t* text,
-                                           const bool checked,
-                                           const runtime_command action,
-                                           const float y) {
-                    luil::check_config config {};
-                    config.owner = owner;
-                    config.label = text;
-                    config.checked = checked;
-                    config.toggle = [action](const luil::ui_action_context&) -> std::vector<luil::input_action> {
-                        return { luil::app_ui_command { .command = static_cast<std::uint32_t>(action) } };
+                const bool pending { runtime_state_.pending_recording && !runtime_state_.busy };
+                {
+                    luil::panel_config card_config {};
+                    card_config.corner_radius = 8.0f;
+                    auto card { std::make_unique<luil::panel_element>(
+                        luil::ui_element_id { command_kind, u8"draft-card" }, std::move(card_config)
+                    )
                     };
-
-                    auto element { std::make_unique<luil::check_element>(std::move(config)) };
-                    element->set_enabled(editable);
-                    element->arrange(
-                        { { 20 * scale, y * scale, content_width * scale, luil::check_row_height * scale }, scale }
+                    luil::stack_config inner_config {};
+                    inner_config.padding = luil::edge_insets::symmetric(16.0f, 12.0f);
+                    inner_config.spacing = 2.0f;
+                    auto inner { std::make_unique<luil::stack_element>(
+                        luil::ui_element_id { command_kind, u8"draft-card-content" }, inner_config
+                    )
+                    };
+                    const auto source { runtime_state_.recorded_region };
+                    const auto duration {
+                        recording_time(static_cast<std::uint64_t>(runtime_state_.recorded_duration))
+                    };
+                    inner->add(
+                        make_label(
+                            u8"draft-heading",
+                            runtime_state_.pending_recording ? u8"보관 중인 녹화" : u8"보관 중인 녹화 없음",
+                            11.0f,
+                            luil::label_color_role::dim
+                        ),
+                        20.0f
                     );
-                    content_root->add(std::move(element));
-                };
+                    inner->add(
+                        make_label(
+                            u8"draft-info",
+                            runtime_state_.pending_recording
+                                ? duration + u8" · " + value_text(source.width) + u8" × " + value_text(source.height)
+                                    + u8" px"
+                                : std::u8string { u8"녹화를 정지하면 원본을 여기에 보관합니다" },
+                            runtime_state_.pending_recording ? 15.0f : 12.0f
+                        ),
+                        26.0f
+                    );
+                    inner->add(
+                        make_label(u8"draft-saved", runtime_state_.saved_summary, 11.0f, luil::label_color_role::dim),
+                        20.0f
+                    );
+                    card->set_content(std::move(inner));
+                    add(std::move(card), 94.0f);
+                }
+                gap(10.0f);
+                {
+                    std::vector<std::unique_ptr<luil::ui_element>> buttons {};
+                    buttons.push_back(option_button(
+                        u8"save-recording",
+                        u8"녹화 저장",
+                        runtime_command::save_recording,
+                        pending && !counting,
+                        luil::text_button_visual::accent
+                    ));
+                    buttons.push_back(option_button(
+                        u8"discard-recording",
+                        u8"녹화 비우기",
+                        runtime_command::discard_recording,
+                        pending && !counting,
+                        luil::text_button_visual::danger
+                    ));
+                    button_row(u8"draft-buttons", std::move(buttons));
+                }
+                gap(8.0f);
+                {
+                    std::vector<std::unique_ptr<luil::ui_element>> buttons {};
+                    buttons.push_back(option_button(
+                        u8"edit-recording", u8"보관 녹화 편집", runtime_command::edit_recording, pending && !counting
+                    ));
+                    buttons.push_back(option_button(
+                        u8"open-animation",
+                        u8"이미지를 열어 편집",
+                        runtime_command::show_animation_editor,
+                        !runtime_state_.busy && !runtime_state_.recording && !counting
+                    ));
+                    button_row(u8"editor-buttons", std::move(buttons));
+                }
+                gap(8.0f);
                 check_box(
                     u8"auto-save",
                     u8"녹화 정지 시 바로 저장",
                     settings.auto_save,
                     runtime_command::toggle_auto_save,
-                    642
+                    editable,
+                    u8"녹화를 정지하면 아래 설정으로 바로 파일을 만듭니다. 원본은 저장 후에도 남습니다."
                 );
-                text_button(
-                    u8"save-recording",
-                    u8"녹화 저장",
-                    runtime_command::save_recording,
-                    20,
-                    686,
-                    224,
-                    runtime_state_.pending_recording && !runtime_state_.busy,
-                    luil::text_button_visual::accent
-                );
-                text_button(
-                    u8"discard-recording",
-                    u8"녹화 비우기",
-                    runtime_command::discard_recording,
-                    254,
-                    686,
-                    content_width - 234,
-                    runtime_state_.pending_recording && !runtime_state_.busy,
-                    luil::text_button_visual::danger
-                );
-                text_button(
-                    u8"edit-recording",
-                    u8"보관 녹화 편집",
-                    runtime_command::edit_recording,
-                    20,
-                    770,
-                    content_width,
-                    runtime_state_.pending_recording && !runtime_state_.busy
-                );
-                text_button(
-                    u8"open-animation",
-                    u8"이미지를 열어 편집",
-                    runtime_command::show_animation_editor,
-                    20,
-                    812,
-                    content_width,
-                    !runtime_state_.busy && !runtime_state_.recording
-                );
-                label(
-                    u8"save-note",
-                    u8"원본은 저장 후에도 유지됩니다. 새 녹화로 다음 촬영을 시작하세요.",
-                    20,
-                    726,
-                    content_width,
-                    11,
-                    true
+                gap(18.0f);
+                heading(u8"format-heading", u8"형식");
+                {
+                    const auto format { settings.capture.animation_format };
+                    auto [element, choice_height] { choice(
+                        u8"animation-format",
+                        u8"애니메이션 형식",
+                        { { u8"webp", u8"WebP" }, { u8"apng", u8"APNG" }, { u8"gif", u8"GIF" } },
+                        format == image_format::apng      ? u8"apng"
+                            : format == image_format::gif ? u8"gif"
+                                                          : u8"webp",
+                        runtime_command::set_animation_format
+                    )
+                    };
+                    field(u8"save-format-label", u8"애니메이션", std::move(element), choice_height);
+                }
+                gap(8.0f);
+                const bool webp { settings.capture.animation_format == image_format::webp
+                                  || settings.capture.still_format == image_format::webp
+                };
+                {
+                    auto [element, choice_height] { choice(
+                        u8"webp-mode",
+                        u8"WebP 압축 방식",
+                        { { u8"lossless", u8"무손실" }, { u8"lossy", u8"손실" } },
+                        settings.capture.webp_lossless ? u8"lossless" : u8"lossy",
+                        runtime_command::set_webp_mode,
+                        webp
+                    )
+                    };
+                    field(u8"webp-mode-label", u8"WebP 압축", std::move(element), choice_height);
+                }
+                gap(10.0f);
+                {
+                    auto line { std::make_unique<luil::stack_element>(
+                        luil::ui_element_id { command_kind, u8"quality-row" }, row_config(8.0f)
+                    )
+                    };
+                    line->add_flexible(make_label(u8"quality-label", u8"손실 압축 품질"));
+                    line->add_fit(make_label(u8"quality-value", value_text(settings.capture.webp_quality), 14.0f));
+                    add(std::move(line), 24.0f);
+                }
+                {
+                    luil::slider_config quality {};
+                    quality.minimum = 1;
+                    quality.maximum = 100;
+                    quality.value = runtime_state_.quality_position;
+                    quality.magnets = { 50, 75, 80, 90, 100 };
+                    const auto quality_command
+                        = [](const runtime_command action, const float value) -> luil::input_action {
+                        const auto text { std::to_string(value) };
+                        return luil::app_ui_command { static_cast<std::uint32_t>(action),
+                                                      { text.begin(), text.end() }
+                        };
+                    };
+                    quality.change = [quality_command](const float delta) {
+                        return quality_command(runtime_command::adjust_webp_quality, delta);
+                    };
+                    quality.change_to = [quality_command](const float value) {
+                        return quality_command(runtime_command::set_webp_quality, value);
+                    };
+                    auto slider { std::make_unique<luil::slider_element>(
+                        luil::ui_element_id { command_kind, u8"webp-quality" }, std::move(quality)
+                    )
+                    };
+                    slider->set_access_name(u8"WebP 손실 압축 품질 · 1~100");
+                    slider->set_tooltip(u8"WebP 손실 압축 품질 · 1~100");
+                    slider->set_enabled(editable && webp && !settings.capture.webp_lossless);
+                    help[u8"webp-quality"]
+                        = { .title = u8"WebP 손실 압축 품질",
+                            .body
+                            = u8"낮을수록 파일이 작아지고 화질이 떨어집니다. 저장 후 품질이나 출력 크기를 바꿔 다시 "
+                              u8"저장할 수 있습니다. 보관 원본에는 영향을 주지 않습니다."
+                        };
+                    add(std::move(slider), 24.0f);
+                }
+                gap(18.0f);
+                heading(u8"size-heading", u8"크기·압축");
+                {
+                    const auto source_region { runtime_state_.pending_recording
+                                                   ? std::optional<capture_region> { runtime_state_.recorded_region }
+                                                   : selected_region
+                    };
+                    const int output_percent { settings.capture.output_percent };
+                    auto line { std::make_unique<luil::stack_element>(
+                        luil::ui_element_id { command_kind, u8"scale-row" }, row_config(8.0f)
+                    )
+                    };
+                    line->add_flexible(make_label(u8"export-scale-label", u8"출력 크기 · 사진과 애니메이션"));
+                    line->add_fit(make_label(
+                        u8"export-output-dimensions",
+                        value_text(output_percent) + u8"% · "
+                            + (source_region ? value_text(source_region->width * output_percent / 100) + u8" × "
+                                       + value_text(source_region->height * output_percent / 100) + u8" px"
+                                             : std::u8string { u8"영역을 선택하세요" })
+                    ));
+                    add(std::move(line), 24.0f);
+                }
+                {
+                    luil::slider_config scale_config {};
+                    scale_config.maximum = 5;
+                    scale_config.value = runtime_state_.output_step;
+                    scale_config.magnets = { 0, 1, 2, 3, 4, 5 };
+                    const auto scale_action
+                        = [](const runtime_command command, const float value) -> luil::input_action {
+                        const auto text { std::to_string(value) };
+                        return luil::app_ui_command { static_cast<std::uint32_t>(command),
+                                                      { text.begin(), text.end() }
+                        };
+                    };
+                    scale_config.change = [scale_action](const float delta) {
+                        return scale_action(runtime_command::adjust_scale, delta);
+                    };
+                    scale_config.change_to = [scale_action](const float value) {
+                        return scale_action(runtime_command::set_scale_index, value);
+                    };
+                    auto scale_slider { std::make_unique<output_slider_element>(scale_config) };
+                    scale_slider->set_access_name(u8"출력 배율 · 25, 50, 75, 100, 150, 200% 단계");
+                    scale_slider->set_enabled(editable);
+                    help[u8"scale"]
+                        = { .title = u8"출력 배율",
+                            .body
+                            = u8"25·50·75·100·150·200% 단계로 조절합니다. 캡쳐 영역은 유지하며 저장될 이미지의 크기만 "
+                              u8"변경합니다. 방향키로 한 단계씩 이동합니다."
+                        };
+                    add(std::move(scale_slider), 24.0f);
+                }
+                add_note(u8"export-scale-note", u8"25 · 50 · 75 · 100 · 150 · 200%", 1);
+                gap(12.0f);
+                const auto compression { settings.capture.compression };
+                {
+                    auto [element, choice_height] { choice(
+                        u8"compression",
+                        u8"WebP 저장 방식",
+                        { { u8"fast", u8"빠른 저장" }, { u8"small", u8"균형" }, { u8"maximum", u8"최대 압축" } },
+                        compression == lossless_compression::fast          ? u8"fast"
+                            : compression == lossless_compression::maximum ? u8"maximum"
+                                                                           : u8"small",
+                        runtime_command::set_compression,
+                        webp
+                    )
+                    };
+                    field(u8"compression-label", u8"압축 속도", std::move(element), choice_height);
+                }
+                gap(4.0f);
+                add_note(
+                    u8"compression-note",
+                    !webp                                           ? u8"WebP 선택 시 사용할 수 있습니다."
+                        : compression == lossless_compression::fast ? u8"후처리를 생략해 빠르게 저장합니다."
+                        : compression == lossless_compression::maximum
+                        ? u8"최대 압축은 저장에 오래 걸릴 수 있습니다."
+                        : u8"권장 · 저장 속도와 파일 크기의 균형을 맞춥니다."
                 );
             }
+            // 테마·명령창·프레임·단축키처럼 앱 전체에 걸리는 설정이다.
             else
             {
-                const auto& appearance { runtime_state_.settings.appearance };
-                luil::theme_picker_config picker {};
-                picker.owner = u8"theme";
-                picker.selected = appearance.theme;
-                picker.accent_id = appearance.accent_id;
-                picker.card_width = (content_width - 24) / 3;
-                picker.preview_height = 48;
-                picker.select = [](const luil::theme_preference theme) -> luil::input_action {
-                    return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::set_theme),
-                                                  std::u8string { luil::theme_preference_name(theme) }
-                    };
-                };
-                auto themes { std::make_unique<luil::theme_picker_element>(picker) };
-                themes->set_enabled(editable);
-                themes->arrange(
-                    { { 20 * scale,
-                        208 * scale,
-                        content_width * scale,
-                        luil::theme_picker_element::height_for(picker, content_width) * scale
-                    },
-                      scale
-                    }
-                );
-                content_root->add(std::move(themes));
-                label(u8"appearance-note", u8"테마와 키 컬러는 즉시 반영하고 저장합니다", 20, 308, content_width, 11);
-                label(u8"accent-label", u8"키 컬러", 20, 340, 110, 14);
-                label(
-                    u8"accent-name",
-                    std::u8string { luil::accent_for(appearance.accent_id).label },
-                    140,
-                    340,
-                    content_width - 120
-                );
-
-                luil::accent_picker_config color_config {};
-                color_config.owner = u8"accent-picker";
-                color_config.selected = appearance.accent_id;
-                color_config.name = u8"키 컬러";
-                color_config.select = [](const std::u8string& accent) -> luil::input_action {
-                    return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::set_accent), accent };
-                };
-                auto colors { std::make_unique<luil::accent_picker_element>(color_config) };
-                colors->set_enabled(editable);
-                colors->arrange(
-                    { { 20 * scale,
-                        374 * scale,
-                        content_width * scale,
-                        luil::accent_picker_element::height_for(color_config, content_width) * scale
-                    },
-                      scale
-                    }
-                );
-
-                for (const auto& element : colors->children())
+                const auto& appearance { settings.appearance };
+                heading(u8"theme-heading", u8"테마");
                 {
-                    help[element->id().owner]
-                        = { .title = element->accessibility().name,
-                            .body = u8"버튼 강조색과 캡쳐 프레임·글로우에 함께 적용합니다. 재실행해도 유지됩니다."
+                    luil::theme_picker_config picker {};
+                    picker.owner = u8"theme";
+                    picker.selected = appearance.theme;
+                    picker.accent_id = appearance.accent_id;
+                    // 앱 설정은 늘 흘리므로 스크롤 막대 폭을 빼야 카드 셋이 한 줄에 선다.
+                    const float inner_width { content_width - luil::scroll_area_bar_width };
+                    picker.card_width = (inner_width - 24) / 3;
+                    picker.preview_height = 48;
+                    picker.select = [](const luil::theme_preference theme) -> luil::input_action {
+                        return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::set_theme),
+                                                      std::u8string { luil::theme_preference_name(theme) }
                         };
+                    };
+                    const float picker_height { luil::theme_picker_element::height_for(picker, inner_width) };
+                    auto themes { std::make_unique<luil::theme_picker_element>(picker) };
+                    themes->set_enabled(editable);
+                    add(std::move(themes), picker_height);
                 }
-
-                content_root->add(std::move(colors));
-                label(u8"shortcuts-heading", u8"단축키", 20, 490, content_width, 14);
-                shortcuts_.add_inputs(
-                    [&](std::unique_ptr<luil::ui_element> element) { content_root->add(std::move(element)); },
-                    width / scale,
-                    526,
-                    scale,
-                    editable
-                );
-
-                const auto bindings { shortcuts_.bindings() };
-                const auto add_button = [&](
-                                            const char8_t* owner, const char8_t* text, const float x, const bool apply
-                                        ) {
-                    auto element = std::make_unique<luil::text_button_element>(
-                        luil::ui_element_id { command_kind, owner },
-                        luil::text_button_config { .text = text,
-                                                   .visual = apply ? luil::text_button_visual::accent
-                                                                   : luil::text_button_visual::normal
-                        }
+                gap(12.0f);
+                {
+                    auto line { std::make_unique<luil::stack_element>(
+                        luil::ui_element_id { command_kind, u8"accent-row" }, row_config(12.0f)
+                    )
+                    };
+                    line->add(make_label(u8"accent-label", u8"키 컬러"), 108.0f);
+                    line->add_flexible(
+                        make_label(u8"accent-name", std::u8string { luil::accent_for(appearance.accent_id).label })
                     );
-                    element->set_access_name(text);
-                    element->set_enabled(editable && (!apply || bindings.has_value()));
-                    element->set_action(
+                    add(std::move(line), 24.0f);
+                }
+                gap(6.0f);
+                {
+                    luil::accent_picker_config color_config {};
+                    color_config.owner = u8"accent-picker";
+                    color_config.selected = appearance.accent_id;
+                    color_config.name = u8"키 컬러";
+                    color_config.select = [](const std::u8string& accent) -> luil::input_action {
+                        return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::set_accent), accent };
+                    };
+                    const float colors_height { luil::accent_picker_element::height_for(
+                        color_config, content_width - luil::scroll_area_bar_width
+                    ) };
+                    auto colors { std::make_unique<luil::accent_picker_element>(color_config) };
+                    colors->set_enabled(editable);
+                    for (const auto& element : colors->children())
+                    {
+                        help[element->id().owner]
+                            = { .title = element->accessibility().name,
+                                .body
+                                = u8"버튼 강조색과 캡쳐 프레임·글로우에 함께 적용합니다. 재실행해도 유지됩니다."
+                            };
+                    }
+                    add(std::move(colors), colors_height);
+                }
+                gap(4.0f);
+                add_note(u8"appearance-note", u8"테마와 키 컬러는 바로 반영하고 저장합니다");
+                gap(18.0f);
+                heading(u8"window-heading", u8"명령창·프레임");
+                check_box(
+                    u8"always-on-top",
+                    u8"명령창 항상 위",
+                    settings.always_on_top,
+                    runtime_command::toggle_always_on_top,
+                    runtime_state_.settings_writable,
+                    u8"명령창을 다른 창보다 위에 표시합니다. 설정은 재실행해도 유지됩니다."
+                );
+                gap(6.0f);
+                check_box(
+                    u8"close-to-tray",
+                    u8"닫기 버튼을 누르면 알림 영역으로 숨기기",
+                    settings.close_to_tray,
+                    runtime_command::toggle_close_to_tray,
+                    editable,
+                    u8"닫아도 앱이 알림 영역에 남아 단축키로 계속 촬영할 수 있습니다. 알림 영역 아이콘으로 다시 열거나 "
+                    u8"종료합니다."
+                );
+                gap(12.0f);
+                {
+                    auto line { std::make_unique<luil::stack_element>(
+                        luil::ui_element_id { command_kind, u8"glow-row" }, row_config(8.0f)
+                    )
+                    };
+                    line->add_flexible(make_label(u8"glow-label", u8"프레임 글로우 두께"));
+                    line->add_fit(make_label(u8"glow-value", value_text(settings.glow_width) + u8" px"));
+                    add(std::move(line), 24.0f);
+                }
+                {
+                    luil::slider_config glow {};
+                    glow.minimum = 0;
+                    glow.maximum = 40;
+                    glow.magnets = { 0, 12, 24, 40 };
+                    glow.value = runtime_state_.glow_position;
+                    glow.change_to = [](const float value) -> luil::input_action {
+                        const auto number { std::to_string(static_cast<int>(std::clamp(value, 0.0f, 40.0f) + 0.5f)) };
+                        return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::set_glow_width),
+                                                      { number.begin(), number.end() }
+                        };
+                    };
+                    glow.change = [](const float delta) -> luil::input_action {
+                        const auto number { std::to_string(delta) };
+                        return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::adjust_glow_width),
+                                                      { number.begin(), number.end() }
+                        };
+                    };
+                    auto slider { std::make_unique<luil::slider_element>(
+                        luil::ui_element_id { command_kind, u8"glow-width" }, std::move(glow)
+                    )
+                    };
+                    slider->set_access_name(u8"프레임 글로우 두께 · 0~40px");
+                    slider->set_tooltip(u8"프레임 글로우 두께 · 0~40px");
+                    slider->set_enabled(editable);
+                    help[u8"glow-width"]
+                        = { .title = u8"프레임 글로우 두께",
+                            .body
+                            = u8"프레임 바깥으로 번지는 빛의 범위를 조절합니다. 0은 끄기입니다. 캡쳐 영역 안은 그대로 "
+                              u8"유지됩니다."
+                        };
+                    add(std::move(slider), 24.0f);
+                }
+                gap(18.0f);
+                heading(u8"shortcuts-heading", u8"단축키");
+                add(shortcuts_.make_inputs(editable), shortcut_editor::inputs_height());
+                gap(10.0f);
+                {
+                    const auto bindings { shortcuts_.bindings() };
+                    auto line { std::make_unique<luil::stack_element>(
+                        luil::ui_element_id { command_kind, u8"shortcut-buttons" }, row_config(10.0f)
+                    )
+                    };
+                    auto reset { std::make_unique<luil::text_button_element>(
+                        luil::ui_element_id { command_kind, u8"reset-shortcuts" },
+                        luil::text_button_config { .text = u8"기본값" }
+                    )
+                    };
+                    reset->set_access_name(u8"기본값");
+                    reset->set_enabled(editable);
+                    reset->set_action(
+                        luil::ui_trigger::left_click, luil::make_message_action(reset_shortcuts_intent {})
+                    );
+                    line->add_fit(std::move(reset));
+                    auto revert { std::make_unique<luil::text_button_element>(
+                        luil::ui_element_id { command_kind, u8"revert-shortcuts" },
+                        luil::text_button_config { .text = u8"변경 취소" }
+                    )
+                    };
+                    revert->set_access_name(u8"변경 취소");
+                    revert->set_enabled(editable && shortcuts_edited_);
+                    revert->set_action(
+                        luil::ui_trigger::left_click, luil::make_message_action(revert_shortcuts_intent {})
+                    );
+                    line->add_fit(std::move(revert));
+                    line->add_flexible_gap();
+                    auto apply { std::make_unique<luil::text_button_element>(
+                        luil::ui_element_id { command_kind, u8"apply-shortcuts" },
+                        luil::text_button_config { .text = u8"단축키 적용", .visual = luil::text_button_visual::accent }
+                    )
+                    };
+                    apply->set_access_name(u8"단축키 적용");
+                    apply->set_enabled(editable && bindings.has_value());
+                    apply->set_action(
                         luil::ui_trigger::left_click,
-                        [bindings, apply](const luil::ui_action_context&) -> std::vector<luil::input_action> {
-                            if (!apply)
-                            {
-                                return { luil::make_app_action(reset_shortcuts_intent {}) };
-                            }
-
+                        [bindings](const luil::ui_action_context&) -> std::vector<luil::input_action> {
                             if (!bindings)
                             {
                                 return {};
@@ -1917,92 +1941,35 @@ namespace chalkag {
                             };
                         }
                     );
-                    element->arrange({ { x * scale, 678 * scale, 114 * scale, 32 * scale }, scale });
-                    content_root->add(std::move(element));
-                };
-                add_button(u8"reset-shortcuts", u8"기본값", 20, false);
-                auto revert { std::make_unique<luil::text_button_element>(
-                    luil::ui_element_id { command_kind, u8"revert-shortcuts" },
-                    luil::text_button_config { .text = u8"변경 취소" }
-                )
-                };
-                revert->set_enabled(editable && shortcuts_edited_);
-                revert->set_action(luil::ui_trigger::left_click, luil::make_message_action(revert_shortcuts_intent {}));
-                revert->arrange({ { 158 * scale, 678 * scale, 114 * scale, 32 * scale }, scale });
-                content_root->add(std::move(revert));
-
-                add_button(u8"apply-shortcuts", u8"단축키 적용", width / scale - 134, true);
-
+                    line->add_fit(std::move(apply));
+                    add(std::move(line), 32.0f);
+                }
+                gap(8.0f);
                 const auto error { shortcuts_.error() };
-                label(
+                add_note(
                     u8"shortcut-error",
-                    error.empty() ? (shortcuts_edited_ ? std::u8string {} : runtime_state_.shortcut_error) : error,
-                    20,
-                    720,
-                    content_width,
-                    11,
-                    true
+                    error.empty() ? (shortcuts_edited_ ? std::u8string {} : runtime_state_.shortcut_error) : error
                 );
-                label(
+                add_note(
                     u8"shortcut-help",
                     shortcuts_edited_ ? u8"적용 전 변경이 있습니다. 탭을 이동해도 입력은 유지됩니다."
-                                      : u8"Ctrl+Alt+F9처럼 입력 후 적용하세요. 빈 값은 사용하지 않습니다.",
-                    20,
-                    762,
-                    content_width,
-                    11,
-                    true
+                                      : u8"Ctrl+Alt+F9처럼 입력 후 적용하세요. 빈 값은 사용하지 않습니다."
                 );
             }
 
-            if (page_ == options_page::capture || page_ == options_page::region)
+            gap(18.0f);
             {
-                luil::check_config cursor {};
-                cursor.owner = u8"include-cursor";
-                cursor.label = u8"마우스 커서 포함";
-                cursor.checked = runtime_state_.settings.capture.include_cursor;
-                cursor.toggle = [](const luil::ui_action_context&) -> std::vector<luil::input_action> {
-                    return { luil::app_ui_command { .command
-                                                    = static_cast<std::uint32_t>(runtime_command::toggle_cursor)
-                    }
-                    };
-                };
-
-                auto cursor_element { std::make_unique<luil::check_element>(std::move(cursor)) };
-                cursor_element->set_enabled(editable && !runtime_state_.pending_recording);
-                cursor_element->arrange(
-                    { { 20.0f * scale,
-                        (page_ == options_page::region ? 758.0f : 680.0f) * scale,
-                        260.0f * scale,
-                        luil::check_row_height * scale
-                    },
-                      scale
-                    }
-                );
-                content_root->add(std::move(cursor_element));
+                // 상태 줄은 비어 있어도 자리를 지켜 저장 결과가 생길 때 아래 내용이 밀리지 않게 한다.
+                auto [element, note_height] { make_note(u8"runtime-status", runtime_state_.status, content_width) };
+                add(std::move(element), std::max(note_height, 18.0f));
             }
-
-            label(
-                u8"runtime-status",
-                runtime_state_.status,
-                20,
-                page_ == options_page::preferences  ? 844.0f
-                    : page_ == options_page::output ? 896.0f
-                                                    : 796.0f,
-                content_width,
-                11,
-                true
-            );
             help[u8"runtime-status"].title = u8"현재 상태 · 저장 결과";
+
+            const float area_top { options_top + 74.0f };
             luil::scroll_area_config scrolling {};
             scrolling.owner = u8"options-scroll";
-            scrolling.content_height = (page_ == options_page::preferences  ? 900.0f
-                                            : page_ == options_page::output ? 960.0f
-                                                                            : 850.0f)
-                - 196.0f;
-            options_scroll_ = luil::clamp_scroll(
-                scrolling.content_height, height / scale - command_window_height - 114.0f, options_scroll_
-            );
+            scrolling.content_height = page_height;
+            options_scroll_ = luil::clamp_scroll(scrolling.content_height, height / scale - area_top, options_scroll_);
             scrolling.scroll_offset = options_scroll_;
             scrolling.scroll = [](const float delta) -> luil::input_action {
                 return luil::make_app_action(options_scroll_intent { delta, false });
@@ -2012,16 +1979,8 @@ namespace chalkag {
             };
 
             auto area { std::make_unique<luil::scroll_area_element>(std::move(scrolling)) };
-            area->set_content(std::move(content_root));
-            area->arrange(
-                { { 0,
-                    (command_window_height + 114.0f) * scale,
-                    width,
-                    std::max(0.0f, height - (command_window_height + 114.0f) * scale)
-                },
-                  scale
-                }
-            );
+            area->set_content(std::move(page));
+            area->arrange({ { 0, area_top * scale, width, std::max(0.0f, height - area_top * scale) }, scale });
             root->add(std::move(area));
         }
 
@@ -2038,7 +1997,18 @@ namespace chalkag {
         root->set_enabled(!animation_editor_.confirmation_open());
         frame->close = [dirty = animation_editor_.has_unsaved_changes(),
                         active = runtime_state_.busy || runtime_state_.recording,
-                        pending = runtime_state_.pending_recording]() -> luil::input_action {
+                        unsaved = runtime_state_.pending_recording && !runtime_state_.recording_saved,
+                        tray = runtime_state_.settings.close_to_tray && !runtime_state_.quit_requested,
+                        exiting = runtime_state_.exiting]() -> luil::input_action {
+            if (exiting)
+            {
+                return luil::ui_command::application_exit;
+            }
+            // 알림 영역으로 숨기면 녹화·편집 상태를 그대로 둔다.
+            if (tray)
+            {
+                return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::hide_to_tray) };
+            }
             if (active)
             {
                 return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::request_close) };
@@ -2047,12 +2017,13 @@ namespace chalkag {
             {
                 return luil::make_app_action(animation_editor_intent { animation_editor_action::request_exit });
             }
-            if (pending)
+            if (unsaved)
             {
                 return luil::app_ui_command { static_cast<std::uint32_t>(runtime_command::request_close) };
             }
             return luil::ui_command::application_exit;
         };
+        frame->main_hidden = runtime_state_.hidden;
         frame->tree = std::make_shared<const luil::ui_tree>(std::move(root));
 
         if (animation_editor_.opened() && !runtime_state_.busy && !runtime_state_.recording && !region_state_.selecting)

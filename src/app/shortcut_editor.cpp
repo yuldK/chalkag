@@ -3,6 +3,7 @@
 #include "app/command_window.h"
 
 #include "luil/ui/dialog_elements.h"
+#include "luil/ui/grid_element.h"
 #include "luil/ui/label_element.h"
 
 namespace chalkag {
@@ -132,38 +133,47 @@ namespace chalkag {
         return validate_hotkeys(values);
     }
 
-    void shortcut_editor::add_inputs(
-        const std::function<void(std::unique_ptr<luil::ui_element>)>& add,
-        const float width,
-        const float top,
-        const float scale,
-        const bool editable
-    ) const
+    std::unique_ptr<luil::ui_element> shortcut_editor::make_inputs(const bool editable) const
     {
+        luil::grid_config config {};
+        config.columns = { luil::grid_track::fixed(110), luil::grid_track::flexible() };
+        config.rows.assign(default_hotkeys.size(), luil::grid_track::fixed(32));
+        config.column_spacing = 10;
+        config.row_spacing = 6;
+
+        auto form { std::make_unique<luil::grid_element>(
+            luil::ui_element_id { luil::application_element_kind(0), u8"shortcut-form" }, std::move(config)
+        )
+        };
+
         for (std::size_t index {}; index < fields_.size(); ++index)
         {
-            const float y { top + static_cast<float>(index) * 36 };
             auto label = std::make_unique<luil::label_element>(
                 luil::ui_element_id { luil::application_element_kind(0), std::u8string { owners[index] } + u8"-label" },
                 luil::label_config { .text = labels[index], .font_size = 12 }
             );
-            label->arrange({ { 20 * scale, (y + 4) * scale, 110 * scale, 24 * scale }, scale });
-            add(std::move(label));
+            form->add(std::move(label), { .row = index, .column = 0, .vertical = luil::layout_alignment::center });
 
             const auto target { static_cast<luil::text_input_target>(201 + index) };
-            luil::text_input_config config {};
-            config.placeholder = names[index];
+            luil::text_input_config input_config {};
+            input_config.placeholder = names[index];
 
             auto input = std::make_unique<luil::text_input_element>(
                 luil::ui_element_id { luil::application_element_kind(input_kinds[index]), owners[index] },
                 luil::make_text_input_view(fields_[index], composition_, target),
-                std::move(config)
+                std::move(input_config)
             );
             input->set_access_name(names[index]);
             input->set_enabled(editable);
-            input->arrange({ { 140 * scale, y * scale, (width - 160) * scale, 32 * scale }, scale });
-            add(std::move(input));
+            form->add(std::move(input), { .row = index, .column = 1 });
         }
+
+        return form;
+    }
+
+    float shortcut_editor::inputs_height() noexcept
+    {
+        return static_cast<float>(default_hotkeys.size()) * 38.0f - 6.0f;
     }
 
     std::optional<luil::text_input_target> command_policy::text_target_of(const luil::ui_element_kind kind) const
@@ -227,6 +237,13 @@ namespace chalkag {
         }
 
         return region_editor_policy {}.make_text_composition_action(event);
+    }
+
+    std::vector<luil::input_action> command_policy::on_key(
+        const luil::ui_tree* tree, const luil::key_pressed_event& event, const luil::interaction_snapshot&
+    )
+    {
+        return animation_editor_key_actions(tree, event);
     }
 
     std::optional<luil::menu_kinds> command_policy::menu() const
