@@ -14,7 +14,9 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cwchar>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -339,6 +341,100 @@ namespace chalkag {
             return name;
         }
 
+        // 같은 사용자 세션의 앱은 하나지만 테스트 앱은 여러 개일 수 있으므로 살아 있는 소유자의 폴더는 남긴다.
+        bool process_alive(const unsigned long id)
+        {
+            if (id == GetCurrentProcessId())
+            {
+                return true;
+            }
+
+            const HANDLE process { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, id) };
+
+            if (!process)
+            {
+                return GetLastError() == ERROR_ACCESS_DENIED;
+            }
+
+            DWORD code {};
+            const bool alive { GetExitCodeProcess(process, &code) && code == STILL_ACTIVE };
+            CloseHandle(process);
+            return alive;
+        }
+
+        // capture_날짜_시각_밀리초_PID_순번과 .encoding-PID-순번 이름에서 만든 프로세스를 읽는다.
+        std::optional<unsigned long> temporary_owner(const std::wstring& name)
+        {
+            std::vector<std::wstring> parts {};
+            std::wstring rest {};
+            wchar_t separator {};
+
+            if (name.starts_with(L"capture_"))
+            {
+                rest = name.substr(8);
+                separator = L'_';
+            }
+            else if (name.starts_with(L".encoding-"))
+            {
+                rest = name.substr(10);
+                separator = L'-';
+            }
+            else
+            {
+                return std::nullopt;
+            }
+
+            std::size_t begin {};
+
+            for (auto end { rest.find(separator) }; end != std::wstring::npos; end = rest.find(separator, begin))
+            {
+                parts.push_back(rest.substr(begin, end - begin));
+                begin = end + 1;
+            }
+
+            parts.push_back(rest.substr(begin));
+
+            const std::size_t expected { separator == L'_' ? 5U : 2U };
+            const std::wstring owner { parts.size() == expected ? parts[expected - 2] : std::wstring {} };
+
+            if (owner.empty() || owner.size() > 10 || !std::all_of(owner.begin(), owner.end(), [](const wchar_t value) {
+                    return value >= L'0' && value <= L'9';
+                }))
+            {
+                return std::nullopt;
+            }
+
+            return std::wcstoul(owner.c_str(), nullptr, 10);
+        }
+
+        // 비정상 종료로 남은 녹화 세션과 인코딩 임시 폴더를 시작할 때 정리한다.
+        void remove_stale_temporary(const std::filesystem::path& data)
+        {
+            for (const auto& folder : { data / L"temp", data / L"captures" })
+            {
+                std::error_code code {};
+
+                for (const auto& entry : std::filesystem::directory_iterator { folder, code })
+                {
+                    std::error_code ignored {};
+                    const auto name { entry.path().filename().wstring() };
+
+                    // 저장 폴더에는 사용자 파일이 있으므로 인코더 임시 폴더만 지운다.
+                    if (!entry.is_directory(ignored) || (folder.filename() == L"captures" && !name.starts_with(L".")))
+                    {
+                        continue;
+                    }
+
+                    const auto owner { temporary_owner(name) };
+
+                    if (owner && !process_alive(*owner))
+                    {
+                        std::filesystem::remove_all(entry.path(), ignored);
+                    }
+                }
+            }
+        }
+
     } // namespace
 
     struct image_capture::implementation
@@ -620,7 +716,9 @@ namespace chalkag {
 
     image_capture::image_capture(std::filesystem::path executable_directory, capture_frame_source frame_source)
         : implementation_ { std::make_unique<implementation>(std::move(executable_directory), std::move(frame_source)) }
-    {}
+    {
+        remove_stale_temporary(implementation_->directory / L"data");
+    }
 
     image_capture::~image_capture()
     {

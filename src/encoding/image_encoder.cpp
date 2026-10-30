@@ -263,12 +263,18 @@ namespace chalkag::encoding {
             const auto absolute { std::filesystem::absolute(output) };
             std::filesystem::create_directories(absolute.parent_path());
 
+            const auto scratch_root { options.scratch_directory.empty()
+                                          ? absolute.parent_path()
+                                          : std::filesystem::absolute(options.scratch_directory)
+            };
+            std::filesystem::create_directories(scratch_root);
+
             // 완성 전에는 임시 디렉터리만 변경하고 성공한 후보를 마지막에 교체한다.
             scratch_directory scratch;
 
             for (int attempt {}; attempt < 64 && scratch.path.empty(); ++attempt)
             {
-                const auto candidate { absolute.parent_path()
+                const auto candidate { scratch_root
                                        / (L".encoding-" + std::to_wstring(GetCurrentProcessId()) + L"-"
                                           + std::to_wstring(sequence.fetch_add(1)))
                 };
@@ -323,7 +329,12 @@ namespace chalkag::encoding {
                 return false;
             }
 
-            if (!MoveFileExW(candidate.c_str(), absolute.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            // 임시 폴더가 다른 볼륨에 있으면 Windows가 복사한 뒤 원본을 지운다.
+            if (!MoveFileExW(
+                    candidate.c_str(),
+                    absolute.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH | MOVEFILE_COPY_ALLOWED
+                ))
             {
                 error = u8"인코딩한 파일을 최종 위치에 저장할 수 없습니다.";
                 return false;

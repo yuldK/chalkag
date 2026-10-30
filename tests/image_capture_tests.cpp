@@ -1,5 +1,6 @@
 #include "capture/image_capture.h"
 #include "capture/native_webp_writer.h"
+#include "encoding/image_encoder.h"
 
 #include "include/codec/SkCodec.h"
 #include "include/core/SkBitmap.h"
@@ -781,6 +782,90 @@ namespace chalkag {
             }
         }
 
+        void check_stale_temporary(const std::filesystem::path& directory)
+        {
+            const auto temp { directory / L"data" / L"temp" };
+            const auto captures { directory / L"data" / L"captures" };
+            // 4의 배수가 아닌 PID는 Windows가 쓰지 않으므로 끝난 프로세스로 취급된다.
+            const auto dead { std::to_wstring(0xfffffffdUL) };
+            const auto alive { std::to_wstring(GetCurrentProcessId()) };
+            const auto stale_session { temp / (L"capture_20200101_000000_000_" + dead + L"_0") };
+            const auto own_session { temp / (L"capture_20200101_000000_000_" + alive + L"_9") };
+            const auto stale_scratch { temp / (L".encoding-" + dead + L"-1") };
+            const auto stale_export { captures / (L".encoding-" + dead + L"-2") };
+            const auto user_folder { captures / (L"capture_20200101_000000_000_" + dead + L"_3") };
+            const auto unrelated { temp / L"notes" };
+
+            for (const auto& path : { stale_session, own_session, stale_scratch, stale_export, user_folder, unrelated })
+            {
+                std::filesystem::create_directories(path);
+                std::ofstream { path / L"frame-0.png" } << "x";
+            }
+
+            {
+                const image_capture capture { directory };
+            }
+
+            check(!std::filesystem::exists(stale_session), "startup removes a crashed recording session");
+            check(!std::filesystem::exists(stale_scratch), "startup removes a crashed encoder scratch folder");
+            check(!std::filesystem::exists(stale_export), "startup removes an old scratch folder beside captures");
+            check(std::filesystem::exists(own_session), "startup keeps sessions of a running process");
+            check(std::filesystem::exists(user_folder), "startup never removes user folders in captures");
+            check(std::filesystem::exists(unrelated), "startup keeps unrelated temporary folders");
+        }
+
+        void check_encoder_scratch(const std::filesystem::path& directory)
+        {
+            const auto captures { directory / L"captures" };
+            const auto scratch { directory / L"temp" };
+            SkBitmap bitmap {};
+            check(
+                bitmap.tryAllocPixels(SkImageInfo::Make(8, 6, kBGRA_8888_SkColorType, kOpaque_SkAlphaType)),
+                "allocate scratch fixture"
+            );
+            bitmap.eraseColor(SkColorSetRGB(20, 140, 60));
+
+            const encoding::animation_frame frames[] { { bitmap.pixmap(), 0.1 }, { bitmap.pixmap(), 0.1 } };
+            std::atomic<bool> cancelled {};
+            std::u8string error {};
+            bool scratch_seen {};
+            encoding::encoder_options options { .format = encoding::animation_format::gif };
+            options.scratch_directory = scratch;
+            options.progress = [&](const save_progress progress) {
+                if (progress.stage != save_stage::encoding)
+                {
+                    return;
+                }
+
+                std::error_code ignored {};
+
+                for (const auto& entry : std::filesystem::directory_iterator { scratch, ignored })
+                {
+                    scratch_seen = scratch_seen || entry.path().filename().wstring().starts_with(L".encoding-");
+                }
+            };
+
+            const auto output { captures / L"result.gif" };
+            check(
+                encoding::encode_animation(output, frames, options, cancelled, error)
+                    && std::filesystem::exists(output),
+                "encoder publishes from a separate scratch folder"
+            );
+            check(scratch_seen, "encoder works inside the requested scratch folder");
+
+            bool leaked {};
+
+            for (const auto& folder : { captures, scratch })
+            {
+                for (const auto& entry : std::filesystem::directory_iterator { folder })
+                {
+                    leaked = leaked || entry.path().filename().wstring().starts_with(L".encoding-");
+                }
+            }
+
+            check(!leaked, "encoder leaves no scratch folder in captures or temp");
+        }
+
     } // namespace
 } // namespace chalkag
 
@@ -796,6 +881,8 @@ int wmain(int argument_count, wchar_t* arguments[])
     chalkag::native_checks(directory);
     chalkag::check_retained_still(directory / L"retained-still");
     chalkag::check_partial_recording(directory / L"partial");
+    chalkag::check_stale_temporary(directory / L"stale");
+    chalkag::check_encoder_scratch(directory / L"scratch");
 
     if (!chalkag::failures)
     {
