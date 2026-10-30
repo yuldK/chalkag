@@ -48,6 +48,9 @@ namespace chalkag::encoding {
         std::uint64_t animation_memory_budget { 128 * 1024 * 1024 };
         int play_count {};
         progress_callback progress {};
+        // 인코딩 중간 파일을 둘 폴더다. 비우면 출력 파일 옆에 숨김 이름으로 만든다.
+        // 앱은 사용자에게 보이는 저장 폴더 대신 data/temp를 넘긴다.
+        std::filesystem::path scratch_directory {};
     };
 
     // 0부터 순서대로 읽으며 0을 다시 요청하면 처음으로 되감는다. 픽셀은 다음 읽기까지 유효하다.

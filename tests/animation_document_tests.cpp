@@ -3,8 +3,10 @@
 #include "capture/native_webp_writer.h"
 
 #include <array>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 namespace {
     void require(const bool condition, const char* message)
@@ -86,6 +88,58 @@ int main(const int argc, char** argv)
             *last.pixels.addr32(0, 1) == 0xffaabbcc && *last.pixels.addr32(3, 1) == 0xff556677,
             "deleted delta still participates in reconstruction and crop"
         );
+
+        {
+            // 녹화 문서를 뒤로 넘겨도 처음부터 다시 합성하지 않고 가까운 저장 지점에서 이어 간다.
+            std::filesystem::create_directories(directory / "scrub");
+            chalkag::animation_recorder scrub_recorder { directory / "scrub", chalkag::image_format::apng };
+            auto scrub_canvas { bitmap(0xff102030) };
+
+            for (int index {}; index < 80; ++index)
+            {
+                *scrub_canvas.getAddr32(index % 16, (index / 16) % 8)
+                    = 0xff000000 | static_cast<std::uint32_t>(index * 0x030507 + 1);
+                require(scrub_recorder.append(scrub_canvas.pixmap(), index * 0.05), "scrub capture");
+            }
+
+            const auto scrub {
+                chalkag::animation_document::from_recording({ scrub_recorder.finish(4.0), { 0, 0, 16, 8 }, {} })
+            };
+            require(scrub != nullptr && scrub->durations().size() == 80, "scrub document");
+
+            std::vector<SkBitmap> forward(80);
+
+            for (std::size_t index {}; index < 80; ++index)
+            {
+                require(scrub->read(index, forward[index], cancelled), "forward scrub read");
+            }
+
+            require(scrub->decode_count() == 80, "forward playback decodes each tile once");
+
+            SkBitmap again {};
+            require(scrub->read(79, again, cancelled) && scrub->decode_count() == 80, "same frame reuses composition");
+
+            const auto same_pixels = [](const SkBitmap& left, const SkBitmap& right) {
+                return left.width() == right.width() && left.height() == right.height()
+                    && std::memcmp(left.getPixels(), right.getPixels(), left.computeByteSize()) == 0;
+            };
+
+            require(same_pixels(again, forward[79]), "same frame pixels");
+            require(
+                scrub->read(78, again, cancelled) && scrub->decode_count() == 80 + 15
+                    && same_pixels(again, forward[78]),
+                "previous frame starts from the nearest checkpoint"
+            );
+
+            for (std::size_t index { 78 }; index-- > 0;)
+            {
+                const auto before { scrub->decode_count() };
+                require(
+                    scrub->read(index, again, cancelled) && same_pixels(again, forward[index]), "backward scrub pixels"
+                );
+                require(scrub->decode_count() - before <= 32, "backward step never recomposes more than one stride");
+            }
+        }
 
         auto invalid { edit };
         invalid.crop.x = 15;
@@ -211,6 +265,34 @@ int main(const int argc, char** argv)
                 && (*decoded.getAddr32(0, 0) >> 24) == 128,
             "lossy alpha preserved"
         );
+
+        // 투명한 검정과 불투명한 흰색 체크를 줄이면 회색이 아니라 반투명한 흰색이어야 한다.
+        SkBitmap checker {};
+        require(
+            checker.tryAllocPixels(SkImageInfo::Make(2, 2, kBGRA_8888_SkColorType, kUnpremul_SkAlphaType)),
+            "allocate checker"
+        );
+        *checker.getAddr32(0, 0) = 0x00000000;
+        *checker.getAddr32(1, 1) = 0x00000000;
+        *checker.getAddr32(1, 0) = 0xffffffff;
+        *checker.getAddr32(0, 1) = 0xffffffff;
+
+        for (const auto color_type : { kBGRA_8888_SkColorType, kRGBA_8888_SkColorType })
+        {
+            SkBitmap single {};
+            require(
+                single.tryAllocPixels(SkImageInfo::Make(1, 1, color_type, kUnpremul_SkAlphaType)), "allocate scaled"
+            );
+            require(chalkag::scale_pixels_premultiplied(checker.pixmap(), single.pixmap()), "premultiplied scale");
+
+            const auto* pixel { static_cast<const std::uint8_t*>(single.getPixels()) };
+            std::cout << "checker 2x2 -> 1x1: " << int { pixel[0] } << ',' << int { pixel[1] } << ','
+                      << int { pixel[2] } << ',' << int { pixel[3] } << '\n';
+            require(
+                pixel[0] >= 253 && pixel[1] >= 253 && pixel[2] >= 253 && pixel[3] >= 118 && pixel[3] <= 138,
+                "transparent neighbours do not darken scaled edges"
+            );
+        }
 
         const std::atomic<bool> stopped { true };
         require(!imported->read(0, decoded, stopped), "cancel decode");

@@ -94,6 +94,23 @@ namespace chalkag {
         };
     }
 
+    const SkBitmap& animation_frame_reader::canvas() const noexcept
+    {
+        return canvas_;
+    }
+
+    bool animation_frame_reader::seek(const std::size_t next, const SkPixmap& canvas)
+    {
+        if (next == 0 || next > frames_.size() || canvas.width() != canvas_.width()
+            || canvas.height() != canvas_.height() || !canvas.readPixels(canvas_.pixmap()))
+        {
+            return false;
+        }
+
+        next_ = next;
+        return true;
+    }
+
     bool animation_frame_reader::read(const std::size_t index, encoding::animation_frame& frame)
     {
         if (index == 0)
@@ -276,7 +293,21 @@ namespace chalkag {
                 timeline += frame.duration_seconds;
             }
 
-            return delta ? recorder->finish(timeline) : result;
+            if (!delta)
+            {
+                return result;
+            }
+
+            // 타일 압축은 뒤따라 진행되므로 마무리한 뒤에 저장 실패를 확인해야 일부만 내보내지 않는다.
+            auto rendered { recorder->finish(timeline) };
+
+            if (recorder->storage_failed())
+            {
+                error = u8"변환한 프레임을 저장할 수 없습니다.";
+                return {};
+            }
+
+            return rendered;
         }
         catch (...)
         {

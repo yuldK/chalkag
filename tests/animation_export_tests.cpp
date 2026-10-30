@@ -1,7 +1,6 @@
 #include "capture/animation_export.h"
 #include "capture/animation_recorder.h"
 #include "capture/apng_writer.h"
-#include "capture/native_gif_writer.h"
 #include "capture/native_webp_writer.h"
 
 #include "include/codec/SkCodec.h"
@@ -10,6 +9,7 @@
 
 #include <windows.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -39,6 +39,69 @@ namespace chalkag {
         {
             const auto bytes { read(path) };
             return SkCodec::MakeFromData(SkData::MakeWithCopy(bytes.data(), bytes.size()));
+        }
+
+        // 높은 FPS 입력도 GIF 전체 길이가 실제 시간에서 1cs 안에 머물고 마지막 화면이 남아야 한다.
+        void check_gif_timeline(const std::filesystem::path& output, const int fps, const int count)
+        {
+            SkBitmap bitmap {};
+            bitmap.allocPixels(SkImageInfo::Make(24, 16, kBGRA_8888_SkColorType, kOpaque_SkAlphaType));
+
+            const auto color = [count](const int index) {
+                return index + 1 == count ? SkColorSetRGB(250, 20, 20) : SkColorSetRGB(20, 20, index * 200 / count);
+            };
+
+            const encoding::animation_source source { static_cast<std::size_t>(count),
+                                                      [&](const std::size_t index, encoding::animation_frame& frame) {
+                                                          bitmap.eraseColor(color(static_cast<int>(index)));
+                                                          frame = { bitmap.pixmap(), 1.0 / fps };
+                                                          return true;
+                                                      }
+            };
+
+            const std::atomic<bool> cancelled {};
+            std::u8string error {};
+            check(
+                encoding::encode_animation(
+                    output, source, { .format = encoding::animation_format::gif, .gif_dither = false }, cancelled, error
+                ),
+                "high frame rate GIF encodes"
+            );
+
+            const auto codec { load(output) };
+            check(codec != nullptr, "high frame rate GIF decodes");
+
+            if (!codec)
+            {
+                return;
+            }
+
+            int total_ms {};
+            bool short_delay {};
+
+            for (const auto& info : codec->getFrameInfo())
+            {
+                total_ms += info.fDuration;
+                short_delay = short_delay || info.fDuration < 20;
+            }
+
+            const int expected_ms { static_cast<int>(std::lround(count * 1000.0 / fps)) };
+            std::cout << "GIF " << fps << " FPS x" << count << ": " << codec->getFrameCount() << " frames, " << total_ms
+                      << " ms (expected " << expected_ms << ")\n";
+            check(std::abs(total_ms - expected_ms) <= 10, "GIF total duration tracks the real timeline within 1cs");
+            check(!short_delay, "GIF frames keep the 2cs minimum delay");
+
+            SkBitmap decoded {};
+            decoded.allocPixels(SkImageInfo::Make(24, 16, kBGRA_8888_SkColorType, kPremul_SkAlphaType));
+
+            SkCodec::Options decode_options {};
+            decode_options.fFrameIndex = codec->getFrameCount() - 1;
+            check(
+                codec->getPixels(decoded.info(), decoded.getPixels(), decoded.rowBytes(), &decode_options)
+                        == SkCodec::kSuccess
+                    && SkColorGetR(decoded.getColor(12, 8)) > 200,
+                "GIF keeps the last source frame"
+            );
         }
 
         void run(const std::filesystem::path& directory)
@@ -327,13 +390,21 @@ namespace chalkag {
                 );
             }
 
-            options.animation_format = image_format::gif;
-            options.output_percent = 50;
-            rendered = render_animation_frames(raw, 160, 120, options, directory / "gif", cancelled, error);
-            check(
-                !rendered.empty() && write_gif(directory / "result.gif", rendered, cancelled, error),
-                "native WIC animated GIF export succeeds"
-            );
+            // 앱의 보관 녹화 저장과 같은 리더·encode_animation(GIF) 경로로 시간과 픽셀을 확인한다.
+            {
+                animation_frame_reader reader { raw, 160, 120, 50, cancelled };
+                const auto source { reader.source() };
+                check(
+                    encoding::encode_animation(
+                        directory / "result.gif",
+                        source,
+                        { .format = encoding::animation_format::gif },
+                        cancelled,
+                        error
+                    ),
+                    "product GIF export succeeds"
+                );
+            }
 
             if (!error.empty())
             {
@@ -380,7 +451,12 @@ namespace chalkag {
                 );
             }
 
+            check_gif_timeline(directory / "gif-60.gif", 60, 60);
+            check_gif_timeline(directory / "gif-33.gif", 33, 33);
+            check_gif_timeline(directory / "gif-100.gif", 100, 37);
+
             options.animation_format = image_format::webp;
+            options.output_percent = 50;
             options.webp_lossless = false;
             options.webp_quality = 65;
             rendered = render_animation_frames(raw, 160, 120, options, directory / "lossy", cancelled, error);

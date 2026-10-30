@@ -21,6 +21,10 @@ namespace chalkag {
             const std::atomic<bool>& cancelled
         );
         [[nodiscard]] encoding::animation_source source();
+        // 지금까지 합성한 원본 크기 화면이다. 다음 읽기 전까지 유효하다.
+        [[nodiscard]] const SkBitmap& canvas() const noexcept;
+        // 저장해 둔 합성 화면에서 이어 읽도록 다음 프레임 위치를 옮긴다.
+        [[nodiscard]] bool seek(std::size_t next, const SkPixmap& canvas);
 
     private:
         bool read(std::size_t index, encoding::animation_frame& frame);
