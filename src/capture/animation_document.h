@@ -37,6 +37,8 @@ namespace chalkag {
         [[nodiscard]] int play_count() const noexcept;
         [[nodiscard]] const std::vector<int>& durations() const noexcept;
         [[nodiscard]] bool read(std::size_t index, SkBitmap& bitmap, const std::atomic<bool>& cancelled);
+        // 진단용: 지금까지 코덱 프레임 복원이나 녹화 타일 합성을 수행한 횟수다.
+        [[nodiscard]] std::size_t decode_count() const;
 
     private:
         animation_document();

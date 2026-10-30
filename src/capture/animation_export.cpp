@@ -94,6 +94,23 @@ namespace chalkag {
         };
     }
 
+    const SkBitmap& animation_frame_reader::canvas() const noexcept
+    {
+        return canvas_;
+    }
+
+    bool animation_frame_reader::seek(const std::size_t next, const SkPixmap& canvas)
+    {
+        if (next == 0 || next > frames_.size() || canvas.width() != canvas_.width()
+            || canvas.height() != canvas_.height() || !canvas.readPixels(canvas_.pixmap()))
+        {
+            return false;
+        }
+
+        next_ = next;
+        return true;
+    }
+
     bool animation_frame_reader::read(const std::size_t index, encoding::animation_frame& frame)
     {
         if (index == 0)

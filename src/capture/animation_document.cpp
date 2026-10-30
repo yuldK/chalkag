@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iterator>
+#include <map>
 #include <mutex>
 #include <numeric>
 
@@ -52,6 +54,11 @@ namespace chalkag {
         std::unique_ptr<animation_frame_reader> reader {};
         std::atomic<bool> reader_cancelled {};
         std::size_t next {};
+        encoding::animation_frame last_frame {};
+        // 키는 그 화면 다음에 읽을 프레임 위치다. 뒤로 이동할 때 가장 가까운 앞 지점부터 다시 합성한다.
+        std::map<std::size_t, SkBitmap> checkpoints {};
+        std::size_t checkpoint_stride { 32 };
+        std::size_t decode_count {};
         std::vector<int> durations {};
         int width {};
         int height {};
@@ -60,6 +67,41 @@ namespace chalkag {
 
         SkBitmap decoded {};
         int decoded_index { SkCodec::kNoFrame };
+
+        // 저장 지점은 원본 크기 화면 사본이며 모두 합쳐 256MiB 안에 둔다. 예산을 넘으면 간격을 두 배로
+        // 넓히고 새 간격에 맞지 않는 지점을 버린다. 1080p(약 8MiB)는 32장, 4K는 8장까지 보관한다.
+        void remember_checkpoint()
+        {
+            constexpr std::uint64_t budget { 256ULL * 1024 * 1024 };
+
+            if (next % checkpoint_stride != 0 || next >= durations.size() || checkpoints.contains(next))
+            {
+                return;
+            }
+
+            const auto& canvas { reader->canvas() };
+            const auto limit {
+                std::max<std::uint64_t>(1, budget / std::max<std::uint64_t>(1, canvas.computeByteSize()))
+            };
+
+            while (checkpoints.size() + 1 > limit)
+            {
+                checkpoint_stride *= 2;
+                std::erase_if(checkpoints, [this](const auto& entry) { return entry.first % checkpoint_stride != 0; });
+
+                if (next % checkpoint_stride != 0)
+                {
+                    return;
+                }
+            }
+
+            SkBitmap copy {};
+
+            if (copy.tryAllocPixels(canvas.info()) && canvas.readPixels(copy.pixmap()))
+            {
+                checkpoints.emplace(next, std::move(copy));
+            }
+        }
     };
 
     animation_document::animation_document()
@@ -257,6 +299,8 @@ namespace chalkag {
             }
 
             // 이전 프레임의 blend/disposal 합성은 코덱이 원본을 따라 복원한다.
+            ++state.decode_count;
+
             if (state.codec->getPixels(info, state.decoded.getPixels(), state.decoded.rowBytes(), &options)
                     != SkCodec::kSuccess
                 || cancelled.load())
@@ -269,8 +313,14 @@ namespace chalkag {
             return bitmap.tryAllocPixels(info) && state.decoded.pixmap().readPixels(bitmap.pixmap());
         }
 
-        // 녹화 타일은 순차 합성한다. 이전 프레임을 요청하면 원본 처음부터 리더를 다시 시작한다.
-        if (!state.reader || index < state.next)
+        // 같은 프레임을 다시 요청하면 마지막으로 합성한 화면을 그대로 돌려준다.
+        if (state.reader && state.next > 0 && index == state.next - 1)
+        {
+            const auto& pixels { state.last_frame.pixels };
+            return bitmap.tryAllocPixels(pixels.info()) && pixels.readPixels(bitmap.pixmap());
+        }
+
+        if (!state.reader)
         {
             state.reader = std::make_unique<animation_frame_reader>(
                 state.recording.frames, state.width, state.height, 100, state.reader_cancelled
@@ -278,18 +328,50 @@ namespace chalkag {
             state.next = 0;
         }
 
+        // 녹화 타일은 순차 합성한다. 요청 위치 이하의 가장 가까운 저장 지점이 지금 위치보다 앞서거나
+        // 뒤로 이동해야 하면 그 지점에서 이어 읽는다. 저장 지점이 없으면 처음부터 다시 합성한다.
+        const auto checkpoint { state.checkpoints.upper_bound(index) };
+
+        if (index < state.next
+            || (checkpoint != state.checkpoints.begin() && std::prev(checkpoint)->first > state.next))
+        {
+            if (checkpoint != state.checkpoints.begin()
+                && state.reader->seek(std::prev(checkpoint)->first, std::prev(checkpoint)->second.pixmap()))
+            {
+                state.next = std::prev(checkpoint)->first;
+            }
+            else
+            {
+                state.next = 0;
+            }
+        }
+
         auto source { state.reader->source() };
         encoding::animation_frame frame {};
 
         while (state.next <= index)
         {
-            if (cancelled.load() || !source.read(state.next++, frame))
+            if (cancelled.load() || !source.read(state.next, frame))
             {
+                // 실패한 읽기는 합성 상태를 알 수 없으므로 다음 요청은 처음부터 다시 시작한다.
+                state.reader.reset();
+                state.next = 0;
                 return false;
             }
+
+            ++state.next;
+            ++state.decode_count;
+            state.remember_checkpoint();
         }
 
+        state.last_frame = frame;
         return bitmap.tryAllocPixels(frame.pixels.info()) && frame.pixels.readPixels(bitmap.pixmap());
+    }
+
+    std::size_t animation_document::decode_count() const
+    {
+        const std::lock_guard lock { impl_->mutex };
+        return impl_->decode_count;
     }
 
     animation_edit initial_animation_edit(const animation_document& document)
