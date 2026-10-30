@@ -2027,7 +2027,8 @@ namespace chalkag {
         frame->main_hidden = runtime_state_.hidden;
         frame->tree = std::make_shared<const luil::ui_tree>(std::move(root));
 
-        if (animation_editor_.opened() && !runtime_state_.busy && !runtime_state_.recording && !region_state_.selecting)
+        if (animation_editor_.opened() && !runtime_state_.busy && !runtime_state_.recording && !region_state_.selecting
+            && !runtime_state_.hidden)
         {
             frame->windows.push_back(animation_editor_.make_window());
         }
@@ -2118,12 +2119,13 @@ namespace chalkag {
             }
         }
 
-        if (editor_.opened() && !runtime_state_.busy && !runtime_state_.recording && !region_state_.selecting)
+        if (editor_.opened() && !runtime_state_.busy && !runtime_state_.recording && !region_state_.selecting
+            && !runtime_state_.hidden)
         {
             frame->popups.push_back(editor_.make_popup(scale));
         }
 
-        if (!fps_menu_open_ && !editor_.opened() && !help_dismissed_ && !runtime_state_.busy
+        if (!fps_menu_open_ && !editor_.opened() && !help_dismissed_ && !runtime_state_.busy && !runtime_state_.hidden
             && !runtime_state_.recording && !region_state_.selecting && help_target_.maximum_width >= 160.0f
             && std::max(help_target_.available_above, help_target_.available_below) >= 140.0f)
         {

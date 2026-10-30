@@ -122,8 +122,8 @@ namespace chalkag {
             return result;
         }
 
-        // 알림 영역 아이콘이 보내는 메시지다.
-        constexpr UINT tray_message { WM_APP + 1 };
+        // 알림 영역 아이콘이 보내는 메시지다. luil 주 창은 WM_APP + 1~5를 자기 신호로 쓰므로 멀리 둔다.
+        constexpr UINT tray_message { WM_APP + 0x201 };
 
         [[nodiscard]] std::u8string utf8_number(const int value)
         {
@@ -740,10 +740,11 @@ namespace chalkag {
 
             if (action == runtime_command::quit_application)
             {
+                // 닫기 훅을 거쳐야 녹화·저장·미저장 편집 확인이 모두 적용된다.
                 show_from_tray();
                 state_.quit_requested = true;
                 publish();
-                execute_command({ static_cast<std::uint32_t>(runtime_command::request_close) });
+                close_post_at_ = std::chrono::steady_clock::now() + std::chrono::milliseconds { 150 };
                 return;
             }
 
@@ -1512,6 +1513,7 @@ namespace chalkag {
         void hide_to_tray()
         {
             region_.cancel_selection();
+            host_->post_app_message(luil::app_message { close_region_editor_intent {} });
             queued_action_.reset();
             state_.queued_capture.clear();
             state_.hidden = true;
