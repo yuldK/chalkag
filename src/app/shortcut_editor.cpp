@@ -246,6 +246,15 @@ namespace chalkag {
         return animation_editor_key_actions(tree, event);
     }
 
+    std::vector<luil::input_action> command_policy::on_wheel(
+        const luil::ui_tree& tree, const luil::mouse_wheel_event& event, const float scroll_delta
+    )
+    {
+        // 정책을 둔 앱은 휠을 직접 맡는다. 기본값은 빈 목록이라 그대로 두면 모든 휠이 버려진다.
+        // 어느 창이 받을지는 각 흘리는 창이 단 scroll 출처로 luil이 정한다.
+        return luil::route_wheel(tree, event, scroll_delta);
+    }
+
     std::optional<luil::menu_kinds> command_policy::menu() const
     {
         return region_editor_policy {}.menu();

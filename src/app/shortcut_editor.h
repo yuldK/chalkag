@@ -49,5 +49,8 @@ namespace chalkag {
         [[nodiscard]] std::vector<luil::input_action> on_key(
             const luil::ui_tree* tree, const luil::key_pressed_event& event, const luil::interaction_snapshot& snapshot
         ) override;
+        [[nodiscard]] std::vector<luil::input_action> on_wheel(
+            const luil::ui_tree& tree, const luil::mouse_wheel_event& event, float scroll_delta
+        ) override;
     };
 } // namespace chalkag

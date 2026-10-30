@@ -1051,7 +1051,10 @@ namespace chalkag {
                 wheel_driver.handle(luil::app_message { window_metrics_intent { 400, 420, 1 } });
                 wheel_driver.handle(luil::app_message { options_tab_intent { options_page::output } });
                 const auto wheel_frame { frame_for(wheel_driver) };
-                luil::interaction_controller wheel {};
+                const auto* before { wheel_frame->tree->find({ command_kind, u8"draft-card" }) };
+                const float before_y { before != nullptr ? before->bounds().y : 0.0f };
+                command_policy wheel_policy {};
+                luil::interaction_controller wheel { &wheel_policy };
                 wheel.set_tree(wheel_frame->tree);
                 const auto actions { wheel.process(luil::mouse_wheel_event { .x = 200, .y = 360, .delta = -120 }) };
                 bool scrolled {};
@@ -1059,10 +1062,18 @@ namespace chalkag {
                 for (const auto& action : actions)
                 {
                     const auto* message { std::get_if<luil::app_message>(&action) };
-                    scrolled = scrolled || (message != nullptr && message->get<options_scroll_intent>() != nullptr);
+
+                    if (message != nullptr && message->get<options_scroll_intent>() != nullptr)
+                    {
+                        scrolled = true;
+                        wheel_driver.handle(*message);
+                    }
                 }
 
-                check(scrolled, "mouse wheel over options content scrolls past the image drop overlay");
+                check(scrolled, "mouse wheel over options content reaches the scroll area through the app policy");
+                const auto after_frame { frame_for(wheel_driver) };
+                const auto* after { after_frame->tree->find({ command_kind, u8"draft-card" }) };
+                check(before && after && after->bounds().y < before_y, "mouse wheel moves the options content upward");
             }
 
             const auto target { image_file_drop_target() };
