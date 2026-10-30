@@ -630,7 +630,10 @@ namespace chalkag {
                 return false;
             }
 
-            bitmap.eraseColor(SkColorSetRGB(static_cast<U8CPU>(call * 37), static_cast<U8CPU>(call * 11), 90));
+            // 연속한 호출의 색이 겹치지 않도록 두 채널을 서로 다른 간격으로 0~255 안에서 돌린다.
+            bitmap.eraseColor(
+                SkColorSetRGB(static_cast<U8CPU>((call * 37) & 255), static_cast<U8CPU>((call * 11) & 255), 90)
+            );
             return true;
         }
 
