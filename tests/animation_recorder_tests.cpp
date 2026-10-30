@@ -430,6 +430,45 @@ namespace chalkag {
             check(empty.finish(1.0).empty(), "empty recorder has no animation");
         }
 
+        void run_storage_failure(const std::filesystem::path& directory, const image_format format)
+        {
+            std::filesystem::create_directories(directory);
+            animation_recorder recorder { directory, format };
+            std::vector<pixel_buffer> samples {};
+
+            for (int index {}; index < 4; ++index)
+            {
+                samples.emplace_back(32, 0xff000000U | static_cast<std::uint32_t>((index + 1) * 0x231507));
+            }
+
+            // 세 번째 타일 경로를 디렉터리로 막아 디스크 오류처럼 저장이 실패하게 한다.
+            std::filesystem::create_directory(
+                directory / (format == image_format::apng ? "frame-2.png" : "frame-2.webp")
+            );
+            check(
+                recorder.append(pixmap(samples[0], 8, 4), 0.0) && recorder.append(pixmap(samples[1], 8, 4), 0.1),
+                "frames before storage failure append"
+            );
+            check(!recorder.append(pixmap(samples[2], 8, 4), 0.2), "blocked tile reports storage failure");
+            check(recorder.storage_failed(), "storage failure is distinguishable from invalid input");
+            check(!recorder.append(pixmap(samples[3], 8, 4), 0.3), "storage failure blocks later frames");
+
+            const auto frames { recorder.finish(5.0) };
+            check(frames.size() == 2, "storage failure keeps frames written before the failure");
+            check(duration_ms(frames) == 200, "storage failure ends at the failed frame timestamp");
+
+            expected_frames expected {};
+
+            for (std::size_t index {}; index < frames.size(); ++index)
+            {
+                expected.emplace(frames[index].path, samples[index]);
+            }
+
+            const auto output { directory / (format == image_format::apng ? "result.png" : "result.webp") };
+            check(write_animation(output, format, 8, 4, frames), "partial animation writes");
+            verify_animation(output, 8, 4, frames, expected);
+        }
+
         double milliseconds_since(const std::chrono::steady_clock::time_point begin)
         {
             return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
@@ -588,6 +627,7 @@ namespace chalkag {
                     run_static(directory / "static", format, false);
                     run_static(directory / "long", format, true);
                     run_timing(directory / "timing", format);
+                    run_storage_failure(directory / "storage-failure", format);
                 }
 
                 run_invalid(files.directory / "invalid");

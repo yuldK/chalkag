@@ -13,7 +13,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -81,6 +83,15 @@ namespace chalkag {
         capture_result failure(std::u8string message)
         {
             return { false, std::move(message), {} };
+        }
+
+        std::u8string partial_recording_warning(const double seconds)
+        {
+            char text[32] {};
+            std::snprintf(text, sizeof(text), "%.1f", std::max(0.0, seconds));
+            const std::string_view value { text };
+            return u8"녹화 중 오류로 정지했습니다. 그때까지 녹화한 " + std::u8string { value.begin(), value.end() }
+            + u8"초 분량을 보관했습니다.";
         }
 
         bool valid_options(capture_region region, capture_options options)
@@ -496,6 +507,12 @@ namespace chalkag {
                 auto next { start };
                 const auto interval { std::chrono::nanoseconds { 1000000000LL / options.fps } };
 
+                // 화면 잠금·보안 데스크톱 전환처럼 BitBlt가 잠깐 실패하는 경우는 그 프레임만 건너뛴다.
+                // 목표 FPS로 약 2초 분량(최소 3회)이 연달아 실패할 때만 녹화를 멈춘다.
+                const int read_failure_limit { std::max(3, options.fps * 2) };
+                int read_failures {};
+                double failure_timestamp {};
+
                 while (!stop_requested.load() && !cancelled.load())
                 {
                     const auto captured { steady_clock::now() };
@@ -506,28 +523,44 @@ namespace chalkag {
                         break;
                     }
 
-                    if (!buffer.read())
-                    {
-                        error = u8"녹화 프레임을 캡처할 수 없습니다.";
-                        break;
-                    }
-
-                    const auto latest_stop { stop_nanoseconds.load() };
-
-                    if (latest_stop && clock_nanoseconds(captured) >= latest_stop)
-                    {
-                        break;
-                    }
-
                     const double timestamp { std::chrono::duration<double>(captured - start).count() };
-                    const auto pixels { buffer.pixels() };
-                    if (!recorder.append(pixels, timestamp))
-                    {
-                        error = u8"변경된 녹화 프레임을 보관할 수 없습니다. 디스크 공간을 확인하세요.";
-                        break;
-                    }
 
-                    ++frame_count;
+                    if (buffer.read())
+                    {
+                        read_failures = 0;
+
+                        const auto latest_stop { stop_nanoseconds.load() };
+
+                        if (latest_stop && clock_nanoseconds(captured) >= latest_stop)
+                        {
+                            break;
+                        }
+
+                        const auto pixels { buffer.pixels() };
+
+                        if (!recorder.append(pixels, timestamp))
+                        {
+                            error = u8"변경된 녹화 프레임을 보관할 수 없습니다. 디스크 공간을 확인하세요.";
+                            failure_timestamp = timestamp;
+                            break;
+                        }
+
+                        ++frame_count;
+                    }
+                    else
+                    {
+                        // 연속 실패 구간의 첫 시각을 기억해 정지할 때 그 앞까지만 보관한다.
+                        if (read_failures++ == 0)
+                        {
+                            failure_timestamp = timestamp;
+                        }
+
+                        if (read_failures >= read_failure_limit)
+                        {
+                            error = u8"녹화 프레임을 캡처할 수 없습니다.";
+                            break;
+                        }
+                    }
 
                     const auto now { steady_clock::now() };
                     next += interval;
@@ -553,6 +586,12 @@ namespace chalkag {
                 }
 
                 elapsed = std::chrono::duration<double>(end - start).count();
+
+                // 오류로 멈췄다면 실패한 프레임이 도착한 시각에서 끝내 그때까지 수집한 화면을 살린다.
+                if (!error.empty())
+                {
+                    elapsed = failure_timestamp;
+                }
 
                 if (frame_count)
                 {
@@ -737,7 +776,8 @@ namespace chalkag {
             return failure(u8"녹화를 취소했습니다.");
         }
 
-        if (!state.error.empty())
+        // 한 장도 남지 않았을 때만 오류로 끝내고, 일부라도 있으면 보관한 뒤 경고로 알린다.
+        if (!state.error.empty() && state.frames.empty())
         {
             return failure(state.error);
         }
@@ -749,9 +789,23 @@ namespace chalkag {
 
         state.pending = true;
         cleanup.active = false;
-        return save_immediately
-            ? save_recording(state.options)
-            : capture_result { true, u8"녹화를 보관했습니다. 옵션을 조절한 뒤 저장 버튼을 누르세요.", {} };
+
+        const auto warning { state.error.empty() ? std::u8string {} : partial_recording_warning(state.elapsed) };
+        auto result { save_immediately
+                          ? save_recording(state.options)
+                          : capture_result {
+                                true, u8"녹화를 보관했습니다. 옵션을 조절한 뒤 저장 버튼을 누르세요.", {}
+                          }
+        };
+
+        if (!warning.empty())
+        {
+            result.warning = warning;
+            result.message = warning + u8" 원인: " + state.error + u8" "
+                + (save_immediately ? result.message : u8"옵션을 조절한 뒤 저장 버튼을 누르세요.");
+        }
+
+        return result;
     }
 
     capture_result image_capture::save_recording(const capture_options settings, const progress_callback& progress)

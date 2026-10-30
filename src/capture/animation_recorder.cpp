@@ -21,7 +21,7 @@ namespace chalkag {
 
     bool animation_recorder::append(const SkPixmap& pixels, const double timestamp_seconds)
     {
-        if (failed_ || finished_)
+        if (failed_ || storage_failed_ || finished_)
         {
             return false;
         }
@@ -64,7 +64,10 @@ namespace chalkag {
                 lossless_compression::fast
             ))
         {
-            failed_ = true;
+            // 디스크 부족 같은 저장 실패에서도 이전 프레임의 표시 시간은 아직 확정 전이라 상태가 일관된다.
+            // 실패한 프레임이 도착한 시각을 마지막 그림의 끝으로 삼아 그때까지의 녹화를 살린다.
+            storage_failed_ = true;
+            storage_boundary_ = timestamp_seconds;
             return false;
         }
 
@@ -91,12 +94,14 @@ namespace chalkag {
 
         finished_ = true;
 
-        if (frames_.empty() || !std::isfinite(timestamp_seconds) || timestamp_seconds <= last_sample_)
+        const double end { storage_failed_ ? storage_boundary_ : timestamp_seconds };
+
+        if (frames_.empty() || !std::isfinite(end) || end <= last_sample_)
         {
             return {};
         }
 
-        frames_.back().duration_seconds = timestamp_seconds - last_change_;
+        frames_.back().duration_seconds = end - last_change_;
 
         // 누적 시각을 먼저 반올림하여 프레임별 반올림 오차가 전체 길이에 쌓이지 않게 한다.
         std::vector<encoded_animation_frame> result {};
@@ -129,6 +134,11 @@ namespace chalkag {
         }
 
         return result;
+    }
+
+    bool animation_recorder::storage_failed() const noexcept
+    {
+        return storage_failed_;
     }
 
 } // namespace chalkag

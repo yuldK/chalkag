@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -617,6 +618,169 @@ namespace chalkag {
             );
         }
 
+        // 호출 순서마다 다른 색을 채워 매 프레임이 변경 타일이 되도록 한다.
+        bool fill_sample(const capture_region region, const capture_options options, SkBitmap& bitmap, const int call)
+        {
+            const int width { region.width * options.output_percent / 100 };
+            const int height { region.height * options.output_percent / 100 };
+
+            if (!bitmap.tryAllocPixels(SkImageInfo::Make(width, height, kBGRA_8888_SkColorType, kOpaque_SkAlphaType)))
+            {
+                return false;
+            }
+
+            bitmap.eraseColor(SkColorSetRGB(static_cast<U8CPU>(call * 37), static_cast<U8CPU>(call * 11), 90));
+            return true;
+        }
+
+        bool wait_for(const std::function<bool()>& condition, const std::chrono::seconds limit)
+        {
+            const auto deadline { std::chrono::steady_clock::now() + limit };
+
+            while (!condition() && std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds { 2 });
+            }
+
+            return condition();
+        }
+
+        std::filesystem::path recording_session(const std::filesystem::path& directory)
+        {
+            std::error_code code {};
+
+            for (const auto& entry : std::filesystem::directory_iterator { directory / L"data" / L"temp", code })
+            {
+                if (entry.is_directory() && entry.path().filename().wstring().starts_with(L"capture_"))
+                {
+                    return entry.path();
+                }
+            }
+
+            return {};
+        }
+
+        void check_partial_recording(const std::filesystem::path& directory)
+        {
+            capture_options options {};
+            options.fps = 60;
+
+            {
+                // 화면 수집이 계속 실패하면 약 2초 뒤 스스로 멈추고 앞선 프레임을 보관한다.
+                std::atomic<int> calls {};
+                image_capture capture {
+                    directory / L"src",
+                    [&](const capture_region region, const capture_options settings, SkBitmap& bitmap) {
+                        const int call { ++calls };
+                        return call <= 3 && fill_sample(region, settings, bitmap, call);
+                    }
+                };
+                check(capture.start_recording({ 0, 0, 32, 24 }, options).success, "failing source recording starts");
+                check(
+                    wait_for([&] { return capture.recording_failed(); }, std::chrono::seconds { 10 }),
+                    "sustained source failure stops the worker"
+                );
+                check(calls.load() >= 3 + 2 * options.fps, "source failure retries about two seconds before stopping");
+
+                const auto stopped { capture.stop_recording() };
+                check(
+                    stopped.success && !stopped.warning.empty() && capture.has_pending_recording(),
+                    "source failure keeps the partial recording with a warning"
+                );
+                check(capture.snapshot().frames.size() == 3, "partial recording keeps frames before source failure");
+                check(
+                    capture.recorded_duration() > 0 && capture.recorded_duration() < 1.0,
+                    "partial recording ends at the first failed capture"
+                );
+                const auto exported { capture.save_recording(options) };
+
+                if (!exported.success)
+                {
+                    std::cerr << reinterpret_cast<const char*>(exported.message.c_str()) << '\n';
+                }
+
+                check(exported.success, "partial recording can be exported");
+            }
+
+            {
+                // 잠깐 실패한 프레임은 건너뛰고 녹화를 이어 간다.
+                std::atomic<int> calls {};
+                image_capture capture {
+                    directory / L"skip",
+                    [&](const capture_region region, const capture_options settings, SkBitmap& bitmap) {
+                        const int call { ++calls };
+                        return (call < 3 || call > 6) && fill_sample(region, settings, bitmap, call);
+                    }
+                };
+                check(capture.start_recording({ 0, 0, 32, 24 }, options).success, "transient source recording starts");
+                check(
+                    wait_for([&] { return calls.load() > 10; }, std::chrono::seconds { 5 }),
+                    "transient source keeps sampling"
+                );
+                check(!capture.recording_failed(), "transient source failure keeps recording");
+
+                const auto stopped { capture.stop_recording() };
+                check(
+                    stopped.success && stopped.warning.empty() && capture.snapshot().frames.size() >= 6,
+                    "transient source failure skips only failed frames"
+                );
+            }
+
+            {
+                // 타일 저장 실패 경로에 디렉터리를 만들어 디스크 오류처럼 쓰기를 막는다.
+                const auto root { directory / L"append" };
+                std::atomic<int> calls {};
+                std::atomic<bool> blocked {};
+                image_capture capture {
+                    root,
+                    [&](const capture_region region, const capture_options settings, SkBitmap& bitmap) {
+                        const int call { ++calls };
+
+                        if (call == 3)
+                        {
+                            const auto session { recording_session(root) };
+                            std::error_code code {};
+                            blocked
+                                = !session.empty() && std::filesystem::create_directory(session / L"frame-2.png", code);
+                        }
+
+                        return fill_sample(region, settings, bitmap, call);
+                    }
+                };
+                check(capture.start_recording({ 0, 0, 32, 24 }, options).success, "append failure recording starts");
+                check(
+                    wait_for([&] { return capture.recording_failed(); }, std::chrono::seconds { 5 }),
+                    "append failure stops the worker"
+                );
+                check(blocked.load(), "append failure fixture blocks the third tile");
+
+                const auto stopped { capture.stop_recording() };
+                check(
+                    stopped.success && !stopped.warning.empty() && capture.has_pending_recording()
+                        && capture.snapshot().frames.size() == 2,
+                    "append failure keeps frames stored before the failure"
+                );
+                capture.discard_recording();
+            }
+
+            {
+                // 첫 프레임부터 실패하면 보관할 것이 없으므로 실패로 끝내고 임시 폴더를 지운다.
+                const auto root { directory / L"empty" };
+                image_capture capture { root, [](capture_region, capture_options, SkBitmap&) { return false; } };
+                check(capture.start_recording({ 0, 0, 32, 24 }, options).success, "empty failure recording starts");
+                check(
+                    wait_for([&] { return capture.recording_failed(); }, std::chrono::seconds { 10 }),
+                    "always failing source stops the worker"
+                );
+
+                const auto stopped { capture.stop_recording() };
+                check(
+                    !stopped.success && !capture.has_pending_recording() && recording_session(root).empty(),
+                    "failure without frames removes the session"
+                );
+            }
+        }
+
     } // namespace
 } // namespace chalkag
 
@@ -631,6 +795,7 @@ int wmain(int argument_count, wchar_t* arguments[])
     chalkag::run_checks(directory, screen);
     chalkag::native_checks(directory);
     chalkag::check_retained_still(directory / L"retained-still");
+    chalkag::check_partial_recording(directory / L"partial");
 
     if (!chalkag::failures)
     {

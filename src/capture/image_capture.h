@@ -42,6 +42,8 @@ namespace chalkag {
         bool success {};
         std::u8string message;
         std::filesystem::path output;
+        // 성공했지만 사용자가 알아야 할 문제가 있었을 때 채운다. 오류로 멈춘 녹화의 일부 보관이 대표적이다.
+        std::u8string warning {};
     };
 
     // 주입한 공급자는 출력 배율을 반영한 BGRA 비트맵을 채운다. 비어 있으면 실제 화면을 수집한다.
