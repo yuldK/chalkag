@@ -1042,6 +1042,29 @@ namespace chalkag {
                 );
             }
 
+            // 창 전체를 덮는 드롭 안내가 옵션 본문의 마우스 휠을 가로채지 않는다.
+            {
+                command_driver wheel_driver {};
+                runtime_state wheel_state {};
+                wheel_state.options_open = true;
+                wheel_driver.handle(luil::app_message { wheel_state });
+                wheel_driver.handle(luil::app_message { window_metrics_intent { 400, 420, 1 } });
+                wheel_driver.handle(luil::app_message { options_tab_intent { options_page::output } });
+                const auto wheel_frame { frame_for(wheel_driver) };
+                luil::interaction_controller wheel {};
+                wheel.set_tree(wheel_frame->tree);
+                const auto actions { wheel.process(luil::mouse_wheel_event { .x = 200, .y = 360, .delta = -120 }) };
+                bool scrolled {};
+
+                for (const auto& action : actions)
+                {
+                    const auto* message { std::get_if<luil::app_message>(&action) };
+                    scrolled = scrolled || (message != nullptr && message->get<options_scroll_intent>() != nullptr);
+                }
+
+                check(scrolled, "mouse wheel over options content scrolls past the image drop overlay");
+            }
+
             const auto target { image_file_drop_target() };
             for (const auto* path : { u8"C:\\a.gif", u8"C:\\a.PNG", u8"C:\\a.ApNg", u8"C:\\a.webp" })
             {

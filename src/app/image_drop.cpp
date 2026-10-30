@@ -79,7 +79,9 @@ namespace chalkag {
         , persistent_ { persistent }
     {
         set_drop_target(image_file_drop_target());
-        set_hit_opaque(true);
+        // 드롭 대상은 hit_opaque 없이도 찾는다. 창 전체를 덮는 안내가 방벽이 되면 아래 설정·편집 도구의
+        // 마우스 휠을 삼키므로, 빈 편집창의 고정 안내만 막는다.
+        set_hit_opaque(persistent);
     }
 
     void image_drop_element::arrange(const luil::arrange_context& context)
