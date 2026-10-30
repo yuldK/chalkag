@@ -15,6 +15,33 @@
 #include <numeric>
 
 namespace chalkag {
+    bool scale_pixels_premultiplied(
+        const SkPixmap& source, const SkPixmap& destination, const SkSamplingOptions& sampling
+    )
+    {
+        // 불투명 원본이나 premultiplied 사이의 변환은 Skia가 이미 올바른 공간에서 보간한다.
+        // 원본·대상이 모두 unpremul일 때만 Skia가 straight 색을 그대로 섞으므로 중간 비트맵을 쓴다.
+        // 크기가 같으면 보간이 없으므로 premultiply 왕복으로 낮은 알파의 색 정밀도를 잃지 않게 바로 복사한다.
+        if (source.width() == destination.width() && source.height() == destination.height())
+        {
+            return source.readPixels(destination);
+        }
+
+        if (source.alphaType() == kOpaque_SkAlphaType || source.alphaType() == kPremul_SkAlphaType
+            || destination.alphaType() != kUnpremul_SkAlphaType)
+        {
+            return source.scalePixels(destination, sampling);
+        }
+
+        SkBitmap premultiplied_source {};
+        SkBitmap premultiplied_destination {};
+        return premultiplied_source.tryAllocPixels(source.info().makeAlphaType(kPremul_SkAlphaType))
+            && source.readPixels(premultiplied_source.pixmap())
+            && premultiplied_destination.tryAllocPixels(destination.info().makeAlphaType(kPremul_SkAlphaType))
+            && premultiplied_source.pixmap().scalePixels(premultiplied_destination.pixmap(), sampling)
+            && premultiplied_destination.pixmap().readPixels(destination);
+    }
+
     class animation_document::impl
     {
     public:
@@ -403,8 +430,7 @@ namespace chalkag {
         };
 
         if (!canvas_.pixmap().extractSubset(&subset, SkIRect::MakeXYWH(crop.x, crop.y, crop.width, crop.height))
-            || !output_.tryAllocPixels(info)
-            || !subset.scalePixels(output_.pixmap(), SkSamplingOptions { SkCubicResampler::Mitchell() }))
+            || !output_.tryAllocPixels(info) || !scale_pixels_premultiplied(subset, output_.pixmap()))
         {
             return false;
         }

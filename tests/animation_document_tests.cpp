@@ -212,6 +212,34 @@ int main(const int argc, char** argv)
             "lossy alpha preserved"
         );
 
+        // 투명한 검정과 불투명한 흰색 체크를 줄이면 회색이 아니라 반투명한 흰색이어야 한다.
+        SkBitmap checker {};
+        require(
+            checker.tryAllocPixels(SkImageInfo::Make(2, 2, kBGRA_8888_SkColorType, kUnpremul_SkAlphaType)),
+            "allocate checker"
+        );
+        *checker.getAddr32(0, 0) = 0x00000000;
+        *checker.getAddr32(1, 1) = 0x00000000;
+        *checker.getAddr32(1, 0) = 0xffffffff;
+        *checker.getAddr32(0, 1) = 0xffffffff;
+
+        for (const auto color_type : { kBGRA_8888_SkColorType, kRGBA_8888_SkColorType })
+        {
+            SkBitmap single {};
+            require(
+                single.tryAllocPixels(SkImageInfo::Make(1, 1, color_type, kUnpremul_SkAlphaType)), "allocate scaled"
+            );
+            require(chalkag::scale_pixels_premultiplied(checker.pixmap(), single.pixmap()), "premultiplied scale");
+
+            const auto* pixel { static_cast<const std::uint8_t*>(single.getPixels()) };
+            std::cout << "checker 2x2 -> 1x1: " << int { pixel[0] } << ',' << int { pixel[1] } << ','
+                      << int { pixel[2] } << ',' << int { pixel[3] } << '\n';
+            require(
+                pixel[0] >= 253 && pixel[1] >= 253 && pixel[2] >= 253 && pixel[3] >= 118 && pixel[3] <= 138,
+                "transparent neighbours do not darken scaled edges"
+            );
+        }
+
         const std::atomic<bool> stopped { true };
         require(!imported->read(0, decoded, stopped), "cancel decode");
         require(!chalkag::animation_document::open(directory / "missing.webp", error), "invalid import");

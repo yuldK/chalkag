@@ -4,11 +4,20 @@
 #include "capture/region_geometry.h"
 #include "encoding/image_encoder.h"
 #include "include/core/SkBitmap.h"
+#include "include/core/SkSamplingOptions.h"
 
 #include <memory>
 #include <vector>
 
 namespace chalkag {
+    // straight alpha 픽셀을 premultiplied 공간에서 보간하여 투명한 이웃이 가장자리를 어둡게 만들지 않게 한다.
+    // 원본과 대상의 색 형식·알파 형식은 서로 달라도 되며 대상 형식으로 변환해 채운다.
+    [[nodiscard]] bool scale_pixels_premultiplied(
+        const SkPixmap& source,
+        const SkPixmap& destination,
+        const SkSamplingOptions& sampling = SkSamplingOptions { SkCubicResampler::Mitchell() }
+    );
+
     struct recording_snapshot
     {
         std::vector<encoded_animation_frame> frames {};
