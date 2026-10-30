@@ -8,6 +8,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $project_root = Split-Path -Parent $PSScriptRoot
 
+# clang-format 출력은 UTF-8이다. 콘솔 코드 페이지(CP949 등)로 읽으면 한글이 깨진 채 다시 쓰이므로 고정한다.
+$previous_output_encoding = [Console]::OutputEncoding
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+
 # clang-format는 중첩 초기화 목록의 마지막 값과 닫는 중괄호를 같은 줄에 놓기도 한다.
 # 앱 스타일 검사와 맞추기 위해 여러 줄 중괄호의 끝을 독립된 줄로 정규화한다.
 function Convert-MultilineBraceClosures {
@@ -89,4 +93,5 @@ foreach ($source_file in $source_files) {
         [IO.File]::WriteAllText($source_file.FullName, $formatted, [Text.UTF8Encoding]::new($false))
     }
 }
+[Console]::OutputEncoding = $previous_output_encoding
 Write-Output "Formatting passed for $($source_files.Count) source files."
