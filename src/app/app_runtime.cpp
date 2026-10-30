@@ -485,7 +485,22 @@ namespace chalkag {
             publish();
             job_ = std::async(std::launch::async, [this, auto_save, options] {
                 const auto result { capture_.stop_recording(false) };
-                return result.success && auto_save ? capture_.save_recording(options, progress_observer()) : result;
+
+                if (!result.success || !auto_save)
+                {
+                    return result;
+                }
+
+                // 자동 저장해도 녹화 중 오류로 일부만 보관했다는 경고는 남긴다.
+                auto saved { capture_.save_recording(options, progress_observer()) };
+
+                if (!result.warning.empty())
+                {
+                    saved.warning = result.warning;
+                    saved.message = result.warning + u8" " + saved.message;
+                }
+
+                return saved;
             });
             return;
         }
@@ -1918,6 +1933,12 @@ namespace chalkag {
                 {
                     exit_after_job_ = false;
                     fail(result.message);
+                }
+                else if (result.success && !result.warning.empty())
+                {
+                    // 오류로 녹화가 멈췄지만 그때까지의 원본은 남았으니 무엇이 남았는지 꼭 알린다.
+                    exit_after_job_ = false;
+                    show_dialog(message_dialog_kind::information, u8"녹화가 중간에 멈췄습니다", result.message);
                 }
 
                 if (exit_after_job_)

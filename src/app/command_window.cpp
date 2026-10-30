@@ -1809,7 +1809,8 @@ namespace chalkag {
                     };
                     const float colors_height { luil::accent_picker_element::height_for(
                         color_config, content_width - luil::scroll_area_bar_width
-                    ) };
+                    )
+                    };
                     auto colors { std::make_unique<luil::accent_picker_element>(color_config) };
                     colors->set_enabled(editable);
                     for (const auto& element : colors->children())

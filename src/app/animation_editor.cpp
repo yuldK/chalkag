@@ -1556,6 +1556,8 @@ namespace chalkag {
                     settings.compact = options.compression != lossless_compression::fast;
                     settings.maximum_compression = options.compression == lossless_compression::maximum;
                     settings.play_count = document->play_count();
+                    // 인코딩 중간 파일은 사용자가 보는 저장 폴더가 아니라 data/temp에 둔다.
+                    settings.scratch_directory = output.parent_path().parent_path() / L"temp";
 
                     const auto source { reader.source() };
 
@@ -1738,9 +1740,7 @@ namespace chalkag {
                     if (scaled.tryAllocPixels(
                             SkImageInfo::Make(width, height, kRGBA_8888_SkColorType, kUnpremul_SkAlphaType)
                         )
-                        && bitmap.pixmap().scalePixels(
-                            scaled.pixmap(), SkSamplingOptions { SkCubicResampler::Mitchell() }
-                        ))
+                        && scale_pixels_premultiplied(bitmap.pixmap(), scaled.pixmap()))
                     {
                         result.image = luil::make_rgba_image(
                             width,
@@ -1762,9 +1762,7 @@ namespace chalkag {
                                     thumb_width, thumb_height, kRGBA_8888_SkColorType, kUnpremul_SkAlphaType
                                 )
                             )
-                            && scaled.pixmap().scalePixels(
-                                thumbnail.pixmap(), SkSamplingOptions { SkCubicResampler::Mitchell() }
-                            ))
+                            && scale_pixels_premultiplied(scaled.pixmap(), thumbnail.pixmap()))
                         {
                             result.thumbnail = luil::make_rgba_image(
                                 thumb_width,
