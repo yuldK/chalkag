@@ -11,13 +11,18 @@
 #include "include/core/SkCanvas.h"
 #include "include/core/SkFont.h"
 #include "include/core/SkFontMgr.h"
+#include "include/core/SkImage.h"
 #include "include/core/SkPaint.h"
+#include "include/core/SkRRect.h"
+#include "include/core/SkSamplingOptions.h"
 #include "include/ports/SkTypeface_win.h"
 
 #include <windows.h>
 
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <ole2.h>
+#include <shellscalingapi.h>
 #include <uiautomation.h>
 #include <windowsx.h>
 
@@ -27,6 +32,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -40,11 +46,13 @@ namespace chalkag {
         constexpr wchar_t resize_input_class[] { L"Chalkag.Region.ResizeInput" };
         constexpr wchar_t selection_input_class[] { L"Chalkag.Region.SelectionInput" };
         constexpr wchar_t guide_class[] { L"Chalkag.Region.Guide" };
+        constexpr wchar_t magnifier_class[] { L"Chalkag.Region.Magnifier" };
         constexpr wchar_t dispatcher_class[] { L"Chalkag.Region.Dispatcher" };
         constexpr UINT refresh_frame_message { WM_APP + 3 };
         constexpr int selection_hotkey { 1 };
         constexpr int edit_control { 101 };
         constexpr COLORREF frame_recording { RGB(246, 100, 119) };
+        constexpr int magnifier_samples { 15 };
 
         class edit_button_provider final : public IRawElementProviderSimple, public IInvokeProvider
         {
@@ -282,6 +290,97 @@ namespace chalkag {
             return std::to_wstring(region.width) + L" × " + std::to_wstring(region.height) + L" px";
         }
 
+        [[nodiscard]] std::wstring wide_text(const std::u8string_view text)
+        {
+            const int length { MultiByteToWideChar(
+                CP_UTF8, 0, reinterpret_cast<const char*>(text.data()), static_cast<int>(text.size()), nullptr, 0
+            )
+            };
+
+            std::wstring wide(static_cast<std::size_t>(std::max(0, length)), L'\0');
+            MultiByteToWideChar(
+                CP_UTF8,
+                0,
+                reinterpret_cast<const char*>(text.data()),
+                static_cast<int>(text.size()),
+                wide.data(),
+                length
+            );
+            return wide;
+        }
+
+        // 선택 입력 면이 가상 화면 전체를 덮어 WindowFromPoint가 항상 그 면을 돌려주므로
+        // 최상위 창을 z 순서대로 훑으며 chalkag 창과 보이지 않는 창을 건너뛴다.
+        [[nodiscard]] capture_region window_region_at(const screen_point point, const capture_region screen)
+        {
+            HWND window { GetTopWindow(nullptr) };
+
+            for (int index = 0; window != nullptr && index < 4096; ++index, window = GetWindow(window, GW_HWNDNEXT))
+            {
+                RECT bounds {};
+
+                // 비싼 DWM 조회 전에 창 사각형으로 먼저 거른다. 확장 경계는 항상 창 사각형 안에 있다.
+                if (!IsWindowVisible(window) || IsIconic(window) || !GetWindowRect(window, &bounds)
+                    || !contains(bounds, point))
+                {
+                    continue;
+                }
+
+                wchar_t name[64] {};
+                GetClassNameW(window, name, 64);
+
+                const std::wstring_view class_name { name };
+                const LONG_PTR style { GetWindowLongPtrW(window, GWL_EXSTYLE) };
+
+                if (class_name.starts_with(L"Chalkag.") || (style & WS_EX_TRANSPARENT) != 0)
+                {
+                    continue;
+                }
+
+                BYTE alpha { 255 };
+                DWORD flags {};
+
+                // 완전히 투명한 레이어 창은 화면에 보이지 않으므로 선택 대상이 아니다.
+                if ((style & WS_EX_LAYERED) != 0 && GetLayeredWindowAttributes(window, nullptr, &alpha, &flags)
+                    && (flags & LWA_ALPHA) != 0 && alpha == 0)
+                {
+                    continue;
+                }
+
+                DWORD cloaked {};
+
+                if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0)
+                {
+                    continue;
+                }
+
+                // 보이지 않는 크기 조절 테두리를 빼야 창 가장자리 밖의 화면이 캡쳐에 섞이지 않는다.
+                RECT visible {};
+
+                if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &visible, sizeof(visible))))
+                {
+                    bounds = visible;
+                }
+
+                if (!contains(bounds, point))
+                {
+                    continue;
+                }
+
+                // 바탕 화면을 누르면 창 선택 없이 기존 드래그 동작을 유지한다.
+                if (class_name == L"Progman" || class_name == L"WorkerW")
+                {
+                    return {};
+                }
+
+                return region_from_window_bounds(
+                    { bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top }, screen
+                );
+            }
+
+            return {};
+        }
+
         void fill_rect(const HDC device, const RECT& rect, const COLORREF color)
         {
             const HBRUSH brush { CreateSolidBrush(color) };
@@ -455,6 +554,39 @@ namespace chalkag {
                 BitBlt(target, 0, 0, size_.cx, size_.cy, device_, 0, 0, SRCCOPY);
             }
 
+            // 캡쳐와 같은 방식으로 화면 픽셀을 읽고 GDI가 비워 둔 알파를 불투명으로 채운다.
+            [[nodiscard]] bool read_screen(const int x, const int y)
+            {
+                const HDC screen { GetDC(nullptr) };
+
+                const bool copied { screen != nullptr
+                                    && BitBlt(device_, 0, 0, size_.cx, size_.cy, screen, x, y, SRCCOPY | CAPTUREBLT)
+                                        != FALSE
+                };
+
+                if (screen != nullptr)
+                {
+                    ReleaseDC(nullptr, screen);
+                }
+
+                if (!copied)
+                {
+                    return false;
+                }
+
+                GdiFlush();
+
+                for (int row = 0; row < size_.cy; ++row)
+                {
+                    for (int column = 0; column < size_.cx; ++column)
+                    {
+                        *image_.getAddr32(column, row) |= 0xff000000U;
+                    }
+                }
+
+                return true;
+            }
+
         private:
             void reset() noexcept
             {
@@ -508,6 +640,7 @@ namespace chalkag {
                 register_class(drag_outline_class);
                 register_class(resize_input_class);
                 register_class(selection_input_class);
+                register_class(magnifier_class);
                 dispatcher_ = create_window(dispatcher_class, 0, HWND_MESSAGE);
                 frame_ = create_window(frame_class, WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, owner_);
                 glow_ = create_window(
@@ -539,9 +672,18 @@ namespace chalkag {
                     throw std::runtime_error { "Cannot initialize selection input layer." };
                 }
 
-                SetWindowTextW(selection_input_, L"캡쳐 영역 선택 · Esc 또는 오른쪽 클릭으로 취소");
+                SetWindowTextW(selection_input_, L"캡쳐 영역 선택 · 클릭하면 창 선택 · Esc 또는 오른쪽 클릭으로 취소");
                 guide_
                     = create_window(guide_class, WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, selection_input_);
+                magnifier_ = create_window(
+                    magnifier_class,
+                    WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+                    selection_input_
+                );
+
+                // 돋보기가 제 표본과 산출물에 찍히지 않아야 하므로 제외를 못 하면 표시하지 않는다.
+                magnifier_excluded_ = SetWindowDisplayAffinity(magnifier_, WDA_EXCLUDEFROMCAPTURE) != FALSE;
+                magnifier_sample_.resize(magnifier_samples, magnifier_samples);
 
                 if (edit_request_)
                 {
@@ -612,7 +754,10 @@ namespace chalkag {
             cancel_drag();
             selecting_ = true;
             selection_dragging_ = false;
+            selection_moved_ = false;
             preview_ = {};
+            snap_region_ = {};
+            hover_point_.reset();
             selection_foreground_acquired_ = false;
             ShowWindow(frame_, SW_HIDE);
             foreground_at_selection_ = GetForegroundWindow();
@@ -640,11 +785,12 @@ namespace chalkag {
             RedrawWindow(selection_input_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
             last_selection_input_ = std::chrono::steady_clock::now();
             position_guide();
-            SetWindowTextW(guide_, L"화면을 드래그하여 영역 선택 · Esc 또는 오른쪽 클릭으로 취소");
+            SetWindowTextW(guide_, L"드래그로 영역 선택 · 클릭하면 창 선택 · Esc 또는 오른쪽 클릭으로 취소");
             ShowWindow(guide_, SW_SHOWNOACTIVATE);
             SetTimer(dispatcher_, 1, 100, nullptr);
             SetCursor(LoadCursorW(nullptr, IDC_CROSS));
-            publish(u8"화면을 드래그하세요. Esc / 오른쪽 클릭: 취소");
+            selection_hover(pointer_position());
+            publish(u8"화면을 드래그하거나 창을 클릭하세요. Esc / 오른쪽 클릭: 취소");
         }
 
         [[nodiscard]] std::optional<capture_region> current_region() const
@@ -681,6 +827,11 @@ namespace chalkag {
         {
             glow_width_ = std::clamp(width, 0, 40);
             update_glow();
+        }
+
+        void set_selection_shortcut_text(std::u8string text)
+        {
+            selection_shortcut_ = std::move(text);
         }
 
         void refresh_appearance() noexcept
@@ -1065,7 +1216,7 @@ namespace chalkag {
             }
 
             for (const HWND window :
-                 { drag_outline_, resize_input_, glow_, guide_, selection_input_, frame_, dispatcher_ })
+                 { drag_outline_, resize_input_, glow_, magnifier_, guide_, selection_input_, frame_, dispatcher_ })
             {
                 if (window != nullptr)
                 {
@@ -1081,6 +1232,7 @@ namespace chalkag {
             }
 
             glow_ = nullptr;
+            magnifier_ = nullptr;
             drag_outline_ = nullptr;
             resize_input_ = nullptr;
             guide_ = nullptr;
@@ -1094,7 +1246,10 @@ namespace chalkag {
         void register_class(const wchar_t* name)
         {
             WNDCLASSW config {};
-            config.lpfnWndProc = std::wstring_view { name } == glow_class ? DefWindowProcW : window_proc;
+            // 장식 레이어는 입력과 그리기 없이 알파 비트맵만 제시한다.
+            const std::wstring_view class_name { name };
+            config.lpfnWndProc
+                = class_name == glow_class || class_name == magnifier_class ? DefWindowProcW : window_proc;
             config.hInstance = GetModuleHandleW(nullptr);
             config.hCursor = LoadCursorW(nullptr, IDC_ARROW);
             config.lpszClassName = name;
@@ -1132,15 +1287,23 @@ namespace chalkag {
 
                 ShowWindow(selection_input_, SW_HIDE);
             }
+
+            if (magnifier_ != nullptr)
+            {
+                ShowWindow(magnifier_, SW_HIDE);
+            }
         }
 
         void publish(std::u8string status = {})
         {
             if (host_ != nullptr)
             {
+                // 단축키 표기마다 받침이 달라 조사 없이 "단축키를" 형태로 안내한다.
                 if (manage_selection_hotkey_ && !hotkey_registered_)
                 {
-                    status += u8" · Ctrl+Shift+A을 다른 앱이 사용 중입니다.";
+                    status += selection_shortcut_.empty()
+                        ? u8" · 영역 선택 단축키를 다른 앱이 사용 중입니다."
+                        : u8" · " + selection_shortcut_ + u8" 단축키를 다른 앱이 사용 중입니다.";
                 }
 
                 host_->post_app_message(
@@ -1182,6 +1345,10 @@ namespace chalkag {
             const bool restore_focus { foreground == selection_input_ || foreground == guide_ || foreground == frame_ };
             selecting_ = false;
             selection_dragging_ = false;
+            selection_moved_ = false;
+            snap_region_ = {};
+            hover_point_.reset();
+            magnifier_point_.reset();
             release_selection_input();
             KillTimer(dispatcher_, 1);
             ShowWindow(guide_, SW_HIDE);
@@ -1229,11 +1396,38 @@ namespace chalkag {
                     = selection_foreground_acquired_ || GetForegroundWindow() == selection_input_;
                 selection_origin_ = point;
                 selection_dragging_ = true;
+                selection_moved_ = false;
                 SetCapture(selection_input_);
+            }
+
+            if (!selection_dragging_ && message == WM_MOUSEMOVE)
+            {
+                selection_hover(point);
+                return;
             }
 
             if (selection_dragging_ && (message == WM_MOUSEMOVE || message == WM_LBUTTONUP))
             {
+                // 드래그 임계값을 한 번 넘으면 다시 돌아와도 창 선택으로 바뀌지 않는다.
+                selection_moved_ = selection_moved_
+                    || std::abs(point.x - selection_origin_.x) > GetSystemMetrics(SM_CXDRAG)
+                    || std::abs(point.y - selection_origin_.y) > GetSystemMetrics(SM_CYDRAG);
+
+                if (!selection_moved_ && snap_region_.valid())
+                {
+                    if (message == WM_LBUTTONUP)
+                    {
+                        preview_ = snap_region_;
+                        finish_selection(true);
+                    }
+                    else
+                    {
+                        update_magnifier(point);
+                    }
+
+                    return;
+                }
+
                 preview_ = region_from_drag(selection_origin_, point, virtual_screen());
 
                 if (preview_.valid())
@@ -1242,6 +1436,7 @@ namespace chalkag {
                 }
 
                 InvalidateRect(guide_, nullptr, FALSE);
+                update_magnifier(point);
 
                 if (message == WM_LBUTTONUP)
                 {
@@ -1252,6 +1447,7 @@ namespace chalkag {
                     else
                     {
                         selection_dragging_ = false;
+                        selection_moved_ = false;
 
                         if (GetCapture() == selection_input_)
                         {
@@ -1260,11 +1456,209 @@ namespace chalkag {
 
                         ShowWindow(frame_, SW_HIDE);
                         preview_ = {};
+                        hover_point_.reset();
                         InvalidateRect(guide_, nullptr, FALSE);
+                        update_magnifier(point);
                         publish(u8"최소 16 x 16 px 이상의 영역을 다시 드래그하세요.");
                     }
                 }
             }
+        }
+
+        // 드래그 전에는 포인터 아래 창의 보이는 경계를 윤곽선으로만 보여 준다.
+        void selection_hover(const screen_point point)
+        {
+            if (!selecting_ || selection_dragging_)
+            {
+                return;
+            }
+
+            if (hover_point_ && hover_point_->x == point.x && hover_point_->y == point.y)
+            {
+                return;
+            }
+
+            hover_point_ = point;
+            snap_region_ = window_region_at(point, virtual_screen());
+
+            if (snap_region_ != preview_)
+            {
+                preview_ = snap_region_;
+
+                if (preview_.valid())
+                {
+                    update_frame();
+                }
+                else
+                {
+                    ShowWindow(frame_, SW_HIDE);
+                }
+
+                InvalidateRect(guide_, nullptr, FALSE);
+            }
+
+            update_magnifier(point);
+        }
+
+        void update_magnifier(const screen_point point)
+        {
+            magnifier_point_ = point;
+
+            if (magnifier_ == nullptr || !magnifier_excluded_ || !selecting_)
+            {
+                if (magnifier_ != nullptr)
+                {
+                    ShowWindow(magnifier_, SW_HIDE);
+                }
+
+                return;
+            }
+
+            // 돋보기 실패가 선택 자체를 취소하지 않도록 이 경계에서 정리한다.
+            try
+            {
+                render_magnifier(point);
+            }
+            catch (...)
+            {
+                ShowWindow(magnifier_, SW_HIDE);
+            }
+        }
+
+        void render_magnifier(const screen_point point)
+        {
+            const POINT native { point.x, point.y };
+            const HMONITOR monitor { MonitorFromPoint(native, MONITOR_DEFAULTTONEAREST) };
+            MONITORINFO info { sizeof(MONITORINFO) };
+
+            if (!GetMonitorInfoW(monitor, &info))
+            {
+                ShowWindow(magnifier_, SW_HIDE);
+                return;
+            }
+
+            // 창이 아직 다른 모니터에 있을 수 있으므로 포인터가 있는 모니터의 DPI를 쓴다.
+            UINT dpi_x {};
+            UINT dpi_y {};
+
+            const int dpi { SUCCEEDED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpi_x, &dpi_y)) && dpi_x > 0
+                                ? static_cast<int>(dpi_x)
+                                : 96
+            };
+            const int cell { std::max(4, MulDiv(8, dpi, 96)) };
+            const int inset { std::max(1, MulDiv(2, dpi, 96)) };
+            const int zoom { cell * magnifier_samples };
+            const int text_height { MulDiv(38, dpi, 96) };
+            const int width { zoom + inset * 2 };
+            const int height { zoom + inset * 2 + text_height };
+            const int half { magnifier_samples / 2 };
+
+            if (!magnifier_sample_.read_screen(point.x - half, point.y - half))
+            {
+                SkCanvas sample { magnifier_sample_.image() };
+                sample.clear(skia_color(frame_background_));
+            }
+
+            magnifier_bitmap_.resize(width, height);
+
+            SkCanvas canvas { magnifier_bitmap_.image() };
+            canvas.clear(SK_ColorTRANSPARENT);
+
+            const float radius { static_cast<float>(MulDiv(8, dpi, 96)) };
+            draw_rounded_rect(canvas, { 0, 0, width, height }, radius, frame_background_, frame_border_);
+
+            const SkRect zoom_rect { SkRect::MakeXYWH(
+                static_cast<float>(inset), static_cast<float>(inset), static_cast<float>(zoom), static_cast<float>(zoom)
+            )
+            };
+
+            // 확대 픽셀은 보간 없이 그려야 경계 픽셀을 정확히 고를 수 있다.
+            canvas.save();
+            canvas.clipRRect(SkRRect::MakeRectXY(zoom_rect, radius - 1.0f, radius - 1.0f), true);
+            canvas.drawImageRect(
+                magnifier_sample_.image().asImage(), zoom_rect, SkSamplingOptions { SkFilterMode::kNearest }
+            );
+            canvas.restore();
+
+            // 십자선은 중앙 픽셀을 가리지 않도록 그 바깥에만 긋는다.
+            const float cell_size { static_cast<float>(cell) };
+            const float line { static_cast<float>(std::max(1, MulDiv(1, dpi, 96))) };
+            const float center_left { zoom_rect.left() + cell_size * static_cast<float>(half) };
+            const float center_top { zoom_rect.top() + cell_size * static_cast<float>(half) };
+            const float line_start { (cell_size - line) / 2.0f };
+            const float line_end { (cell_size + line) / 2.0f };
+            SkPaint cross {};
+            cross.setColor(skia_color(frame_accent_));
+            cross.setAlpha(150);
+
+            const std::array<SkRect, 4> cross_lines {
+                SkRect::MakeLTRB(zoom_rect.left(), center_top + line_start, center_left, center_top + line_end),
+                SkRect::MakeLTRB(
+                    center_left + cell_size, center_top + line_start, zoom_rect.right(), center_top + line_end
+                ),
+                SkRect::MakeLTRB(center_left + line_start, zoom_rect.top(), center_left + line_end, center_top),
+                SkRect::MakeLTRB(
+                    center_left + line_start, center_top + cell_size, center_left + line_end, zoom_rect.bottom()
+                ),
+            };
+
+            for (const SkRect& cross_line : cross_lines)
+            {
+                canvas.drawRect(cross_line, cross);
+            }
+
+            // 중앙 픽셀은 밝고 어두운 두 겹 테두리로 어떤 배경에서도 보이게 한다.
+            SkPaint outline {};
+            outline.setStyle(SkPaint::kStroke_Style);
+            outline.setStrokeWidth(line);
+            outline.setColor(skia_color(frame_background_));
+
+            auto center { SkRect::MakeXYWH(center_left, center_top, cell_size, cell_size) };
+            center.outset(line / 2.0f, line / 2.0f);
+            canvas.drawRect(center, outline);
+            center.inset(line, line);
+            outline.setColor(skia_color(frame_foreground_));
+            canvas.drawRect(center, outline);
+
+            const auto position { std::to_wstring(point.x) + L", " + std::to_wstring(point.y) };
+            const auto size { preview_.valid() ? region_dimensions(preview_) : std::wstring { L"드래그 또는 클릭" } };
+            const int text_top { inset * 2 + zoom };
+            const int line_height { (text_height - inset) / 2 };
+            const float font_size { 11.0f * static_cast<float>(dpi) / 96.0f };
+            draw_label(
+                canvas,
+                position,
+                { inset, text_top, width - inset, text_top + line_height },
+                font_size,
+                frame_foreground_
+            );
+            draw_label(
+                canvas,
+                size,
+                { inset, text_top + line_height, width - inset, text_top + line_height * 2 },
+                font_size,
+                frame_muted_
+            );
+
+            const screen_point origin { magnifier_origin(
+                point,
+                width,
+                height,
+                MulDiv(24, dpi, 96),
+                { info.rcMonitor.left,
+                  info.rcMonitor.top,
+                  info.rcMonitor.right - info.rcMonitor.left,
+                  info.rcMonitor.bottom - info.rcMonitor.top
+                }
+            )
+            };
+
+            const auto title { L"돋보기 " + position + L" · " + size };
+            SetWindowTextW(magnifier_, title.c_str());
+            magnifier_bitmap_.present(magnifier_, { origin.x, origin.y });
+            SetWindowPos(
+                magnifier_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+            );
         }
 
         void update_frame()
@@ -2017,12 +2411,55 @@ namespace chalkag {
             publish(region_text(*region_));
         }
 
+        // 선택 중 화살표는 실제 포인터를 1 px(Shift는 10 px) 옮겨 경계 픽셀을 맞추게 한다.
+        [[nodiscard]] bool nudge_pointer(const WPARAM key)
+        {
+            const int step { (GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 10 : 1 };
+            screen_point delta {};
+
+            switch (key)
+            {
+            case VK_LEFT:
+                delta.x = -step;
+                break;
+
+            case VK_RIGHT:
+                delta.x = step;
+                break;
+
+            case VK_UP:
+                delta.y = -step;
+                break;
+
+            case VK_DOWN:
+                delta.y = step;
+                break;
+
+            default:
+                return false;
+            }
+
+            POINT cursor {};
+
+            if (GetCursorPos(&cursor))
+            {
+                SetCursorPos(cursor.x + delta.x, cursor.y + delta.y);
+            }
+
+            return true;
+        }
+
         void context_menu()
         {
             const HMENU menu { CreatePopupMenu() };
-            AppendMenuW(
-                menu, MF_STRING, 1, manage_selection_hotkey_ ? L"영역 다시 선택\tCtrl+Shift+A" : L"영역 다시 선택"
-            );
+            std::wstring reselect { L"영역 다시 선택" };
+
+            if (!selection_shortcut_.empty())
+            {
+                reselect += L"\t" + wide_text(selection_shortcut_);
+            }
+
+            AppendMenuW(menu, MF_STRING, 1, reselect.c_str());
             AppendMenuW(menu, MF_STRING, 2, L"영역 해제");
 
             const screen_point pointer { pointer_position() };
@@ -2245,7 +2682,7 @@ namespace chalkag {
                 RECT text { padding, padding, client.right - padding, padding + MulDiv(24, dpi, 96) };
                 draw_label(
                     canvas,
-                    L"화면을 드래그하여 캡쳐 영역을 선택하세요",
+                    L"드래그로 영역 선택 · 클릭하면 창 선택",
                     text,
                     12.0f * static_cast<float>(dpi) / 96.0f,
                     GetSysColor(COLOR_WINDOWTEXT)
@@ -2349,6 +2786,11 @@ namespace chalkag {
                     if (wparam == VK_ESCAPE)
                     {
                         finish_selection(false);
+                        return 0;
+                    }
+
+                    if (message == WM_KEYDOWN && nudge_pointer(wparam))
+                    {
                         return 0;
                     }
                 }
@@ -2513,6 +2955,11 @@ namespace chalkag {
                         || std::chrono::steady_clock::now() - last_selection_input_ > std::chrono::minutes { 5 })
                     {
                         finish_selection(false);
+                    }
+                    else if (magnifier_point_)
+                    {
+                        // 포인터가 멈춰 있어도 아래 화면이 바뀌면 확대 표본을 따라 갱신한다.
+                        update_magnifier(*magnifier_point_);
                     }
                 }
 
@@ -2718,6 +3165,11 @@ namespace chalkag {
                         ShowWindow(self->guide_, SW_HIDE);
                     }
 
+                    if (self->magnifier_ != nullptr)
+                    {
+                        ShowWindow(self->magnifier_, SW_HIDE);
+                    }
+
                     if (self->frame_ != nullptr)
                     {
                         ShowWindow(self->frame_, SW_HIDE);
@@ -2905,6 +3357,10 @@ namespace chalkag {
         int glow_width_ { 24 };
         HWND selection_input_ {};
         HWND guide_ {};
+        HWND magnifier_ {};
+        overlay_bitmap magnifier_bitmap_ {};
+        overlay_bitmap magnifier_sample_ {};
+        bool magnifier_excluded_ {};
         HWND edit_button_ {};
         edit_button_provider* edit_provider_ {};
 
@@ -2929,12 +3385,17 @@ namespace chalkag {
         std::optional<std::uint64_t> recording_elapsed_ {};
         bool selecting_ {};
         bool selection_dragging_ {};
+        bool selection_moved_ {};
         bool selection_foreground_acquired_ {};
         HWND foreground_at_selection_ {};
 
         std::chrono::steady_clock::time_point last_selection_input_ {};
         std::optional<capture_region> region_ {};
         capture_region preview_ {};
+        capture_region snap_region_ {};
+        std::optional<screen_point> hover_point_ {};
+        std::optional<screen_point> magnifier_point_ {};
+        std::u8string selection_shortcut_ { u8"Ctrl+Shift+A" };
         screen_point selection_origin_ {};
         screen_point frame_origin_ {};
         RECT inner_ {};
@@ -2987,6 +3448,11 @@ namespace chalkag {
     void region_controller::set_glow_width(const int width)
     {
         impl_->set_glow_width(width);
+    }
+
+    void region_controller::set_selection_shortcut_text(std::u8string text)
+    {
+        impl_->set_selection_shortcut_text(std::move(text));
     }
 
     bool region_controller::set_capture_active(const bool active)

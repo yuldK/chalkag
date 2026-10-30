@@ -176,11 +176,12 @@ namespace chalkag {
                 resize_input = FindWindowW(L"Chalkag.Region.ResizeInput", nullptr);
                 selection_input = FindWindowW(L"Chalkag.Region.SelectionInput", nullptr);
                 guide = FindWindowW(L"Chalkag.Region.Guide", nullptr);
+                magnifier = FindWindowW(L"Chalkag.Region.Magnifier", nullptr);
                 dispatcher = FindWindowExW(HWND_MESSAGE, nullptr, L"Chalkag.Region.Dispatcher", nullptr);
                 edit_button = FindWindowExW(frame, nullptr, L"BUTTON", L"영역 설정");
 
                 if (frame == nullptr || glow == nullptr || drag_outline == nullptr || resize_input == nullptr
-                    || selection_input == nullptr || guide == nullptr || dispatcher == nullptr)
+                    || selection_input == nullptr || guide == nullptr || magnifier == nullptr || dispatcher == nullptr)
                 {
                     controller.reset();
                     DestroyWindow(owner);
@@ -216,10 +217,12 @@ namespace chalkag {
                 controller->begin_selection();
                 check(IsWindowVisible(guide) != FALSE, "selection guide is visible on isolated desktop");
                 check(IsWindowVisible(selection_input) != FALSE, "selection input is visible only during selection");
+                // 드래그는 시작 픽셀과 포인터 아래 픽셀을 모두 포함하므로 마지막 픽셀에서 놓는다.
+                const screen_point last { region.x + region.width - 1, region.y + region.height - 1 };
                 mouse(WM_LBUTTONDOWN, { region.x, region.y });
                 check(GetCapture() == selection_input, "selection window captures drag input directly");
-                mouse(WM_MOUSEMOVE, { region.x + region.width, region.y + region.height });
-                mouse(WM_LBUTTONUP, { region.x + region.width, region.y + region.height });
+                mouse(WM_MOUSEMOVE, last);
+                mouse(WM_LBUTTONUP, last);
                 driver.expect(region, false, "mouse release commits selected region");
                 check(
                     !IsWindowVisible(selection_input) && GetCapture() == nullptr,
@@ -239,6 +242,7 @@ namespace chalkag {
             HWND resize_input {};
             HWND selection_input {};
             HWND guide {};
+            HWND magnifier {};
             HWND dispatcher {};
             HWND edit_button {};
             int edit_requests {};
@@ -297,7 +301,7 @@ namespace chalkag {
             check(
                 !IsWindow(test.frame) && !IsWindow(test.glow) && !IsWindow(test.drag_outline)
                     && !IsWindow(test.resize_input) && !IsWindow(test.selection_input) && !IsWindow(test.guide)
-                    && !IsWindow(test.dispatcher),
+                    && !IsWindow(test.magnifier) && !IsWindow(test.dispatcher),
                 "owned capture windows and both input layers are destroyed"
             );
             check(!IsWindow(test.edit_button), "edit button is destroyed with frame");
@@ -536,6 +540,135 @@ namespace chalkag {
             test.mouse(WM_RBUTTONUP, start);
             test.driver.expect(std::nullopt, false, "right click cancels selection without a global hook");
             check(!IsWindowVisible(test.selection_input), "right click hides the desktop input layer");
+        }
+
+        [[nodiscard]] std::wstring window_title(const HWND window)
+        {
+            std::wstring title(256, L'\0');
+            title.resize(
+                static_cast<std::size_t>(GetWindowTextW(window, title.data(), static_cast<int>(title.size())))
+            );
+            return title;
+        }
+
+        void check_magnifier(const fixture& test, const screen_point pointer, const std::wstring_view size)
+        {
+            DWORD affinity {};
+
+            if (!GetWindowDisplayAffinity(test.magnifier, &affinity) || affinity != WDA_EXCLUDEFROMCAPTURE)
+            {
+                // 캡쳐 제외를 못 하는 환경에서는 표본에 제 모습이 섞이므로 돋보기를 띄우지 않는다.
+                std::cout << "NOTE: magnifier capture exclusion is unavailable on this desktop.\n";
+                check(!IsWindowVisible(test.magnifier), "magnifier stays hidden without capture exclusion");
+                return;
+            }
+
+            check(IsWindowVisible(test.magnifier) != FALSE, "magnifier follows the pointer during selection");
+
+            const LONG_PTR style { GetWindowLongPtrW(test.magnifier, GWL_EXSTYLE) };
+            constexpr LONG_PTR required { WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST };
+            check((style & required) == required, "magnifier is click-through, nonactivating and topmost");
+
+            RECT position {};
+            GetWindowRect(test.magnifier, &position);
+            check(
+                !(pointer.x >= position.left && pointer.x < position.right && pointer.y >= position.top
+                  && pointer.y < position.bottom),
+                "magnifier is offset away from the pointer"
+            );
+
+            const POINT native { pointer.x, pointer.y };
+            MONITORINFO info { sizeof(MONITORINFO) };
+            GetMonitorInfoW(MonitorFromPoint(native, MONITOR_DEFAULTTONEAREST), &info);
+            check(
+                position.left >= info.rcMonitor.left && position.top >= info.rcMonitor.top
+                    && position.right <= info.rcMonitor.right && position.bottom <= info.rcMonitor.bottom,
+                "magnifier stays on the pointer monitor"
+            );
+
+            const auto title { window_title(test.magnifier) };
+            const auto coordinates { std::to_wstring(pointer.x) + L", " + std::to_wstring(pointer.y) };
+            check(
+                title.find(coordinates) != std::wstring::npos && title.find(size) != std::wstring::npos,
+                "magnifier reports pointer coordinates and selection size"
+            );
+        }
+
+        void check_window_snap(fixture& test, const capture_region bounds)
+        {
+            const capture_region target { bounds.x + 30, bounds.y + 40, 140, 100 };
+
+            const HWND window { CreateWindowExW(
+                0,
+                L"STATIC",
+                L"Snap target",
+                WS_POPUP | WS_VISIBLE,
+                target.x,
+                target.y,
+                target.width,
+                target.height,
+                nullptr,
+                nullptr,
+                GetModuleHandleW(nullptr),
+                nullptr
+            )
+            };
+
+            check(window != nullptr, "snap target window is created on isolated desktop");
+
+            if (window == nullptr)
+            {
+                return;
+            }
+
+            const screen_point inside { target.x + 50, target.y + 40 };
+            test.controller->begin_selection();
+            test.mouse(WM_MOUSEMOVE, inside);
+            check(IsWindowVisible(test.frame) != FALSE, "hovered window is outlined before dragging");
+            check(
+                window_title(test.frame).find(L"140 × 100 px") != std::wstring::npos,
+                "hover outline reports the window size"
+            );
+            check_hollow(test.frame, target);
+            check_magnifier(test, inside, L"140 × 100 px");
+
+            // 드래그 임계값 안에서 떨린 클릭도 창 선택으로 처리한다.
+            test.mouse(WM_LBUTTONDOWN, inside);
+            test.mouse(WM_MOUSEMOVE, { inside.x + 1, inside.y + 1 });
+            test.mouse(WM_LBUTTONUP, { inside.x + 1, inside.y + 1 });
+            test.driver.expect(target, false, "click without dragging selects the hovered window bounds");
+            check(!IsWindowVisible(test.magnifier), "magnifier hides when selection ends");
+            check(!IsWindowVisible(test.selection_input), "window click closes the selection input");
+
+            // 창 위에서 시작해도 임계값을 넘기면 기존 드래그 선택을 유지한다.
+            const capture_region dragged { inside.x, inside.y, 40, 30 };
+            test.controller->begin_selection();
+            test.mouse(WM_MOUSEMOVE, inside);
+            test.mouse(WM_LBUTTONDOWN, inside);
+            test.mouse(WM_MOUSEMOVE, { inside.x + 39, inside.y + 29 });
+            test.mouse(WM_LBUTTONUP, { inside.x + 39, inside.y + 29 });
+            test.driver.expect(dragged, false, "dragging over a window keeps rectangle selection");
+
+            // 창이 없는 곳의 클릭은 창 선택 없이 선택 모드를 유지한다.
+            const screen_point empty { bounds.x + bounds.width - 10, bounds.y + bounds.height - 10 };
+            test.controller->begin_selection();
+            test.mouse(WM_MOUSEMOVE, empty);
+            check(!IsWindowVisible(test.frame), "empty desktop shows no window outline");
+            test.mouse(WM_LBUTTONDOWN, empty);
+            test.mouse(WM_LBUTTONUP, empty);
+            test.driver.expect(dragged, true, "click on empty desktop keeps selection mode");
+            test.mouse(WM_RBUTTONUP, empty);
+            test.driver.expect(dragged, false, "right click cancels after empty click");
+            check(!IsWindowVisible(test.magnifier), "magnifier hides when selection is cancelled");
+
+            // 숨긴 창은 고르지 않는다.
+            ShowWindow(window, SW_HIDE);
+            test.controller->begin_selection();
+            test.mouse(WM_MOUSEMOVE, inside);
+            check(!IsWindowVisible(test.frame), "hidden windows are not snapped");
+            SendMessageW(test.selection_input, WM_KEYDOWN, VK_ESCAPE, 0);
+            test.driver.expect(dragged, false, "Escape cancels hidden window hover");
+            DestroyWindow(window);
         }
 
         void check_resize_input(fixture& test, const capture_region region, const capture_region bounds)
@@ -882,6 +1015,7 @@ namespace chalkag {
 
                 const capture_region region { bounds.x + 40, bounds.y + 40, 120, 80 };
                 check_selection_input(test, bounds);
+                check_window_snap(test, bounds);
                 test.select(region);
                 check_hollow(test.frame, region);
                 check(
@@ -1068,10 +1202,10 @@ namespace chalkag {
                     GetCapture() == test.selection_input,
                     "guide clicks are forwarded to selection input instead of passing to the desktop"
                 );
-                test.mouse(WM_LBUTTONUP, { reverse_origin.x - region.width, reverse_origin.y - region.height });
+                test.mouse(WM_LBUTTONUP, { reverse_origin.x - region.width + 1, reverse_origin.y - region.height + 1 });
                 test.driver.expect(
-                    capture_region { reverse_origin.x - region.width,
-                                     reverse_origin.y - region.height,
+                    capture_region { reverse_origin.x - region.width + 1,
+                                     reverse_origin.y - region.height + 1,
                                      region.width,
                                      region.height
                     },
