@@ -521,6 +521,26 @@ namespace chalkag {
             return element;
         };
 
+        // 글 대신 codicon만 그리는 작은 버튼이다. 이름은 보조 기술과 마우스 안내가 말한다.
+        const auto make_icon_button = [&](const char8_t* owner,
+                                          const char8_t* name,
+                                          const char32_t glyph,
+                                          const runtime_command action,
+                                          const bool enabled) {
+            luil::button_config config {};
+            config.glyph = glyph;
+            config.icon_size = 16.0f;
+            config.corner_radius = 6.0f;
+            auto element {
+                std::make_unique<luil::button_element>(luil::ui_element_id { command_kind, owner }, config)
+            };
+            element->set_access_name(name);
+            element->set_action(luil::ui_trigger::left_click, command_action(action));
+            element->set_enabled(enabled && !dialog_open);
+            element->set_cursor(element->enabled() ? luil::ui_cursor::hand : luil::ui_cursor::arrow);
+            return element;
+        };
+
         const auto make_label = [&](const char8_t* owner,
                                     const std::u8string& text,
                                     const float size = 12.0f,
@@ -835,16 +855,16 @@ namespace chalkag {
         // 둘째 줄은 이미지 열기·녹화 편집 링크와 현재 상태 배지다.
         {
             auto links { std::make_unique<luil::stack_element>(
-                luil::ui_element_id { command_kind, u8"quick-links" }, row_config(14.0f)
+                luil::ui_element_id { command_kind, u8"quick-links" }, row_config(4.0f)
             )
             };
             const bool can_open { !runtime_state_.busy && !runtime_state_.recording && !counting };
-            auto open { make_text_button(
+            auto open { make_icon_button(
                 u8"quick-open-image",
                 u8"이미지 열기",
+                luil::codicons::icon_file_media,
                 runtime_command::open_animation,
-                can_open,
-                luil::text_button_visual::link
+                can_open
             )
             };
             help.emplace(
@@ -853,16 +873,16 @@ namespace chalkag {
                                .body = std::u8string { option_button_help(runtime_command::show_animation_editor) }
                 }
             );
-            links->add_fit(std::move(open));
+            links->add(std::move(open), 30.0f);
 
             if (runtime_state_.pending_recording)
             {
-                auto edit { make_text_button(
+                auto edit { make_icon_button(
                     u8"quick-edit-recording",
                     u8"녹화 편집",
+                    luil::codicons::icon_edit,
                     runtime_command::edit_recording,
-                    can_open,
-                    luil::text_button_visual::link
+                    can_open
                 )
                 };
                 help.emplace(
@@ -871,7 +891,7 @@ namespace chalkag {
                                    .body = std::u8string { option_button_help(runtime_command::edit_recording) }
                     }
                 );
-                links->add_fit(std::move(edit));
+                links->add(std::move(edit), 30.0f);
             }
 
             links->add_flexible_gap();
@@ -957,28 +977,32 @@ namespace chalkag {
                 };
                 help[u8"saved-file"] = { .title = u8"저장 파일 열기", .body = runtime_state_.saved_output.u8string() };
                 result->add_flexible(std::move(file));
-                auto copy { make_text_button(
-                    u8"copy-saved", u8"복사", runtime_command::copy_saved_output, true, luil::text_button_visual::link
+                auto copy { make_icon_button(
+                    u8"copy-saved",
+                    u8"클립보드에 복사",
+                    luil::codicons::icon_copy,
+                    runtime_command::copy_saved_output,
+                    true
                 )
                 };
                 help[u8"copy-saved"]
                     = { .title = u8"클립보드에 복사",
                         .body = u8"저장한 파일을 클립보드에 넣습니다. 사진은 그림으로도 붙여 넣을 수 있습니다."
                     };
-                result->add_fit(std::move(copy));
-                auto folder { make_text_button(
+                result->add(std::move(copy), 30.0f);
+                auto folder { make_icon_button(
                     u8"output-folder",
                     u8"저장 폴더 열기",
+                    luil::codicons::icon_folder_opened,
                     runtime_command::open_output_folder,
-                    true,
-                    luil::text_button_visual::link
+                    true
                 )
                 };
                 help[u8"output-folder"]
                     = { .title = u8"저장 폴더 열기",
                         .body = std::u8string { option_button_help(runtime_command::open_output_folder) }
                     };
-                result->add_fit(std::move(folder));
+                result->add(std::move(folder), 30.0f);
                 result->arrange({ { 12.0f * scale, 116.0f * scale, width - 24.0f * scale, 28.0f * scale }, scale });
                 root->add(std::move(result));
             }
