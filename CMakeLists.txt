@@ -240,8 +240,8 @@ if(CHALKAG_BUILD_TESTS)
     target_compile_options(chalkag_animation_recorder_tests PRIVATE /W4 /WX /utf-8 /permissive-)
     set_target_properties(chalkag_animation_recorder_tests PROPERTIES FOLDER "Tests")
     add_test(NAME capture_animation_recorder COMMAND chalkag_animation_recorder_tests)
-    add_executable(chalkag_animation_export_tests tests/animation_export_tests.cpp
-        src/capture/native_gif_writer.cpp)
+    # GIF는 제품의 encode_animation 경로로 검사한다. WIC 기반 write_gif는 비교용 벤치에만 남긴다.
+    add_executable(chalkag_animation_export_tests tests/animation_export_tests.cpp)
     target_include_directories(chalkag_animation_export_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(chalkag_animation_export_tests PRIVATE chalkag_image_encoding windowscodecs ole32)
     target_compile_definitions(chalkag_animation_export_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

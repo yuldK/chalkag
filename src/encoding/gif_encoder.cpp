@@ -217,10 +217,20 @@ namespace chalkag::encoding {
                     "GIF frame dimensions differ"
                 );
 
-                auto indices { quantize(factory, palette, frame.pixels, options.gif_dither) };
                 timeline += frame.duration_seconds;
 
                 const auto end { static_cast<std::uint64_t>(std::llround(timeline * 100)) };
+                const bool last { frame_index + 1 == source.count };
+
+                // GIF 재생기는 2cs 미만 지연을 느리게 재생하므로 최소 2cs를 지킨다. 경계가 2cs 이상
+                // 나아가지 않은 프레임은 내보내지 않고 시간을 다음 프레임에 넘겨 전체 길이가 실제 시간을 따른다.
+                if (!last && (end < centiseconds + 2))
+                {
+                    report_progress(options.progress, save_stage::encoding, frame_index + 1, source.count);
+                    continue;
+                }
+
+                auto indices { quantize(factory, palette, frame.pixels, options.gif_dither) };
                 const auto delay { std::max<std::uint64_t>(2, end > centiseconds ? end - centiseconds : 0) };
                 centiseconds += delay;
                 CGIF_FrameConfig settings {};
