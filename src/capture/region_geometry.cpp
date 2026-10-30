@@ -28,12 +28,28 @@ namespace chalkag {
             return { std::clamp<coordinate>(position, bounds_position, last_position), size };
         }
 
+        // 시작 픽셀과 포인터 아래 픽셀을 모두 포함해야 오른쪽·아래 끝 픽셀까지 드래그로 고를 수 있다.
         axis_region drag_axis(int origin, int current, int bounds_position, int bounds_extent) noexcept
         {
-            const coordinate end { coordinate { bounds_position } + bounds_extent };
-            const coordinate first { std::clamp<coordinate>(origin, bounds_position, end) };
-            const coordinate second { std::clamp<coordinate>(current, bounds_position, end) };
-            return { std::min(first, second), std::max(first, second) - std::min(first, second) };
+            const coordinate last { coordinate { bounds_position } + bounds_extent - 1 };
+            const coordinate first { std::clamp<coordinate>(origin, bounds_position, last) };
+            const coordinate second { std::clamp<coordinate>(current, bounds_position, last) };
+            return { std::min(first, second), std::max(first, second) - std::min(first, second) + 1 };
+        }
+
+        // 기본 방향에 공간이 없으면 포인터 반대쪽으로 뒤집고 그래도 넘치면 모니터 안으로 민다.
+        coordinate place_axis(int pointer, int extent, int offset, int bounds_position, int bounds_extent) noexcept
+        {
+            const coordinate bounds_end { coordinate { bounds_position } + bounds_extent };
+            coordinate position { coordinate { pointer } + offset };
+
+            if (position + extent > bounds_end)
+            {
+                position = coordinate { pointer } - offset - extent;
+            }
+
+            const coordinate last_position { std::max<coordinate>(bounds_position, bounds_end - extent) };
+            return std::clamp<coordinate>(position, bounds_position, last_position);
         }
 
         axis_region adjust_axis(
@@ -104,6 +120,50 @@ namespace chalkag {
             drag_axis(origin.x, current.x, screen_bounds.x, screen_bounds.width),
             drag_axis(origin.y, current.y, screen_bounds.y, screen_bounds.height)
         );
+    }
+
+    capture_region region_from_window_bounds(
+        capture_region window, capture_region screen_bounds, int minimum_size
+    ) noexcept
+    {
+        if (!window.valid() || !screen_bounds.valid())
+        {
+            return {};
+        }
+
+        const coordinate left { std::max(window.x, screen_bounds.x) };
+        const coordinate top { std::max(window.y, screen_bounds.y) };
+        const coordinate right {
+            std::min(coordinate { window.x } + window.width, coordinate { screen_bounds.x } + screen_bounds.width)
+        };
+        const coordinate bottom {
+            std::min(coordinate { window.y } + window.height, coordinate { screen_bounds.y } + screen_bounds.height)
+        };
+
+        // 화면 밖에만 있는 창은 고를 대상이 아니며 작은 창은 최소 크기로 넓힌다.
+        if (right <= left || bottom <= top)
+        {
+            return {};
+        }
+
+        return fit_region_to_screen(
+            { static_cast<int>(left),
+              static_cast<int>(top),
+              static_cast<int>(right - left),
+              static_cast<int>(bottom - top)
+            },
+            screen_bounds,
+            minimum_size
+        );
+    }
+
+    screen_point magnifier_origin(
+        screen_point pointer, int width, int height, int offset, capture_region monitor
+    ) noexcept
+    {
+        return { static_cast<int>(place_axis(pointer.x, width, offset, monitor.x, monitor.width)),
+                 static_cast<int>(place_axis(pointer.y, height, offset, monitor.y, monitor.height))
+        };
     }
 
     capture_region fit_region_to_screen(capture_region region, capture_region bounds, int minimum_size) noexcept

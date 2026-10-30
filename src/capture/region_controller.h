@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 
 namespace luil {
     class app_host;
@@ -31,6 +32,8 @@ namespace chalkag {
         void set_region(capture_region region);
         void set_appearance(const luil::appearance_settings& appearance);
         void set_glow_width(int width);
+        // 영역 다시 선택 메뉴와 단축키 충돌 안내에 쓰는 표기다. 빈 문자열이면 단축키를 표시하지 않는다.
+        void set_selection_shortcut_text(std::u8string text);
         // 캡쳐 중에는 영역 좌표를 고정하고 프레임을 산출물에서 제외한다.
         [[nodiscard]] bool set_capture_active(bool active);
         void set_recording_elapsed(std::uint64_t seconds);
